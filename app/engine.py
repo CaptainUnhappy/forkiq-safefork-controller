@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .db import DB, log_event, insert_repository, utcnow
 from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConflict,
-                     RateLimited, RefNotFastForward)
+                     RateLimited, RefNotFastForward, RefNotFound)
 
 BATCH = 50
 ERROR_RETRY_SECONDS = 600
@@ -18,8 +18,17 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on Repository {
       id nameWithOwner isFork isArchived
-      defaultBranchRef { name target { ... on Commit { oid } } }
-      parent { nameWithOwner defaultBranchRef { name target { ... on Commit { oid } } } }
+      defaultBranchRef { name target { ... on Commit { oid committedDate } } }
+      refs(refPrefix: "refs/tags/", first: 1, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+        nodes { name target { oid } }
+      }
+      parent {
+        nameWithOwner
+        defaultBranchRef { name target { ... on Commit { oid committedDate } } }
+        refs(refPrefix: "refs/tags/", first: 1, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+          nodes { name target { oid } }
+        }
+      }
     }
   }
 }
@@ -73,6 +82,33 @@ def _set_repo(db, repo_id, **fields):
     db.run(f"UPDATE repositories SET {columns} WHERE id=?", (*fields.values(), repo_id))
 
 
+def _latest_tag(ref):
+    """Newest tag name reachable from a ref, or None when the ref has no tags.
+
+    The batched GraphQL query asks each side's default branch for its single
+    most recent tag (ordered by commit date), so a fork that never retagged
+    still reports the upstream tag it inherited.
+    """
+    nodes = ((ref or {}).get("refs") or {}).get("nodes") or []
+    return nodes[0]["name"] if nodes else None
+
+
+def _version_fields(node, parent):
+    """Human-readable version columns for one repository (tags + commit dates).
+
+    `refs` sits on the repository (all tags, newest first); the commit dates
+    come from each side's default-branch head.
+    """
+    fork_target = ((node.get("defaultBranchRef") or {}).get("target")) or {}
+    parent_target = ((parent.get("defaultBranchRef") or {}).get("target")) or {}
+    return {
+        "fork_tag": _latest_tag(node),
+        "upstream_tag": _latest_tag(parent),
+        "fork_commit_at": fork_target.get("committedDate"),
+        "upstream_commit_at": parent_target.get("committedDate"),
+    }
+
+
 def _parents_by_node(client, node_ids):
     """Batch-fetch parent full names for fork node IDs via GraphQL.
 
@@ -93,6 +129,7 @@ def discover(db, client, *, manual=False):
     """Import forks visible to the installation; mark vanished ones missing."""
     account = None
     repos = client.installation_repos()
+    present_by_name = {repo["full_name"]: repo for repo in repos}
     forks = [repo for repo in repos if repo.get("fork") and repo.get("node_id")]
     parents = _parents_by_node(client, [repo["node_id"] for repo in forks])
     known = {row["full_name"]: row for row in db.all("SELECT * FROM repositories")}
@@ -125,9 +162,20 @@ def discover(db, client, *, manual=False):
         log_event(db, repo_id, "discover", f"发现新 fork {full}（上游 {parent_full}）")
         added += 1
     for full, row in known.items():
-        if row["status"] != "missing":
-            _set_repo(db, row["id"], status="missing", last_error="仓库已不在 GitHub 上")
-            log_event(db, row["id"], "blocked", f"{full} 在 GitHub 上已不存在")
+        present = present_by_name.get(full)
+        if present is None:
+            # Truly gone from the installation: the fork itself no longer exists.
+            if row["status"] != "missing":
+                _set_repo(db, row["id"], status="missing", last_error="仓库已不在 GitHub 上")
+                log_event(db, row["id"], "blocked", f"{full} 在 GitHub 上已不存在")
+            continue
+        if not present.get("fork"):
+            # The repository still exists but is no longer a fork: its upstream
+            # was deleted and GitHub promoted the fork to a standalone repo.
+            # Keep managing it; never report it as gone or drop it. sync_one
+            # owns the status so it stays consistent within a cycle.
+            if not row["upstream_gone"]:
+                _set_repo(db, row["id"], upstream_gone=1)
     db.set_setting("last_discover_at", utcnow())
     if added or manual:
         log_event(db, None, "discover", f"自动发现完成：新增 {added} 个 fork")
@@ -152,9 +200,9 @@ def add_manual(db, client, url):
     return repo_id
 
 
-def _mark_diverged(db, row, upstream_sha, message):
+def _mark_diverged(db, row, upstream_sha, message, version=None):
     _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
-              diverged_upstream_sha=upstream_sha, last_error=message)
+              diverged_upstream_sha=upstream_sha, last_error=message, **(version or {}))
     log_event(db, row["id"], "blocked", f"{row['full_name']} {message}")
 
 
@@ -395,7 +443,8 @@ def _self_update(db, client, row, now, forced):
               f"{row['full_name']} 自身 workflow「{target['name']}」超过 24 小时未运行，已触发自更新")
 
 
-def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forced):
+def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forced,
+                 version=None):
     """Manual-fork mode: keep fork-unique commits, merge upstream in (Sync fork).
 
     Unlike mirror mode this never marks diverged: commits produced in the fork
@@ -406,6 +455,7 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
     upstream" (record and stay quiet) from real work.
     """
     repo_id = row["id"]
+    version = version or {}
     if not forced:
         if fork_sha == upstream_sha:
             if row["status"] != "synced":
@@ -413,19 +463,19 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                           f"{row['full_name']} 已与上游一致（保留自有提交）")
             _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
                       last_merged_upstream_sha=upstream_sha, last_check_at=now,
-                      last_success_at=now, last_error=None)
+                      last_success_at=now, last_error=None, **version)
             return "synced"
         if (row["status"] == "synced" and fork_sha == row["fork_sha"]
                 and upstream_sha == row["last_merged_upstream_sha"]):
             # Neither side moved since the last observation: nothing to do.
-            _set_repo(db, repo_id, last_check_at=now)
+            _set_repo(db, repo_id, last_check_at=now, **version)
             return "synced"
     if row["status"] == "needs_attention" and not forced and not _merge_retry_due(row):
         return "needs_attention"
     if (row["status"] == "diverged" and not forced
             and row["diverged_upstream_sha"] == upstream_sha):
         # Conflict is sticky until upstream advances or the user intervenes.
-        _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha)
+        _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha, **version)
         return "diverged"
     head = f"{row['upstream_full_name'].split('/')[0]}:{fork_branch}"
     try:
@@ -442,7 +492,7 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                       f"{row['full_name']} 已包含上游 {upstream_sha[:12]}（保留自有提交）")
         _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
                   last_merged_upstream_sha=upstream_sha, last_check_at=utcnow(),
-                  last_success_at=utcnow(), last_error=None)
+                  last_success_at=utcnow(), last_error=None, **version)
         return "synced"
     try:
         result = client.merge_upstream(row["full_name"], fork_branch)
@@ -456,7 +506,7 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
             label = "合并"
         _set_repo(db, repo_id, status="synced", fork_sha=confirmed, upstream_sha=upstream_sha,
                   last_merged_upstream_sha=upstream_sha, last_check_at=utcnow(),
-                  last_success_at=utcnow(), last_error=None)
+                  last_success_at=utcnow(), last_error=None, **version)
         log_event(db, repo_id, "synced",
                   f"{row['full_name']} {label}上游 {upstream_sha[:12]}（保留 fork 自有提交）")
         return "synced"
@@ -471,7 +521,7 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
             log_event(db, repo_id, "blocked", f"{row['full_name']} {message}")
         _set_repo(db, repo_id, status="diverged", diverged_at=utcnow(),
                   diverged_upstream_sha=upstream_sha, fork_sha=fork_sha,
-                  last_check_at=utcnow(), last_error=message)
+                  last_check_at=utcnow(), last_error=message, **version)
         return "diverged"
     except Forbidden as error:
         text = str(error)
@@ -482,7 +532,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
             message = f"合并被 GitHub 拒绝（403）：{text[:200]}"
         if row["status"] != "error" or row["last_error"] != message:
             log_event(db, repo_id, "error", f"{row['full_name']} 同步失败：{message}")
-        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message)
+        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message,
+                  **version)
         return "error"
     except (RateLimited, AuthError):
         raise
@@ -490,11 +541,12 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
         message = str(error)[:300]
         if row["status"] != "error" or row["last_error"] != message:
             log_event(db, repo_id, "error", f"{row['full_name']} 同步失败：{message}")
-        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message)
+        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message,
+                  **version)
         return "error"
 
 
-def _classify_forbidden(db, client, row, upstream_sha, error):
+def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
     """403 on a ref update: diverged fork vs missing workflows permission vs other.
 
     GitHub returns 403 (not 422) for App ref updates it refuses; compare tells
@@ -506,12 +558,12 @@ def _classify_forbidden(db, client, row, upstream_sha, error):
     except Exception:
         payload = "probe-failed"
     if payload is None:
-        _mark_diverged(db, row, upstream_sha, "与上游无共同祖先（历史被重写），不会覆盖")
+        _mark_diverged(db, row, upstream_sha, "与上游无共同祖先（历史被重写），不会覆盖", version)
         return "diverged"
     if isinstance(payload, dict):
         unique = payload.get("behind_by", 0)
         if unique > 0:
-            _mark_diverged(db, row, upstream_sha, f"有 {unique} 个独有提交，不会覆盖")
+            _mark_diverged(db, row, upstream_sha, f"有 {unique} 个独有提交，不会覆盖", version)
             return "diverged"
         files = payload.get("files") or []
         if any(str(f.get("filename", "")).startswith(".github/workflows/") for f in files):
@@ -519,16 +571,18 @@ def _classify_forbidden(db, client, row, upstream_sha, error):
                        "在 GitHub App 设置授予 Workflows 读写并批准后自动恢复")
             if row["status"] != "error" or row["last_error"] != message:
                 log_event(db, row["id"], "error", f"{row['full_name']} 同步失败：{message}")
-            _set_repo(db, row["id"], status="error", last_check_at=utcnow(), last_error=message)
+            _set_repo(db, row["id"], status="error", last_check_at=utcnow(),
+                      last_error=message, **(version or {}))
             return "error"
     message = f"推送被 GitHub 拒绝（403）：{str(error)[:200]}"
     if row["status"] != "error" or row["last_error"] != message:
         log_event(db, row["id"], "error", f"{row['full_name']} 同步失败：{message}")
-    _set_repo(db, row["id"], status="error", last_check_at=utcnow(), last_error=message)
+    _set_repo(db, row["id"], status="error", last_check_at=utcnow(), last_error=message,
+              **(version or {}))
     return "error"
 
 
-def _classify_non_ff(db, client, row, upstream_sha):
+def _classify_non_ff(db, client, row, upstream_sha, version=None):
     """Decide between diverged (fork has unique commits) and a lost race.
 
     compare(base=fork, head=upstream): ahead_by counts upstream commits the
@@ -540,7 +594,7 @@ def _classify_non_ff(db, client, row, upstream_sha):
     if payload is None:
         _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
                   diverged_upstream_sha=upstream_sha,
-                  last_error="fork 与上游无共同祖先（历史被重写），不会覆盖")
+                  last_error="fork 与上游无共同祖先（历史被重写），不会覆盖", **(version or {}))
         log_event(db, row["id"], "blocked",
                   f"{row['full_name']} 与上游无共同祖先，已停止自动同步")
         return
@@ -549,7 +603,8 @@ def _classify_non_ff(db, client, row, upstream_sha):
     if unique > 0:
         _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
                   diverged_upstream_sha=upstream_sha,
-                  last_error=f"fork 有 {unique} 个独有提交（落后上游 {upstream_ahead} 个），不会覆盖")
+                  last_error=f"fork 有 {unique} 个独有提交（落后上游 {upstream_ahead} 个），不会覆盖",
+                  **(version or {}))
         log_event(db, row["id"], "blocked",
                   f"{row['full_name']} 分叉：{unique} 个独有提交，已停止自动同步")
     # unique == 0: someone else advanced the fork; retry next cycle.
@@ -565,27 +620,48 @@ def sync_one(db, client, row, node, forced=False):
                   last_error="仓库不可访问（可能已删除或权限变化）")
         return "missing"
     if not node.get("isFork"):
-        _set_repo(db, repo_id, status="blocked", last_check_at=utcnow(),
-                  last_error="不再是 fork")
-        return "blocked"
+        # The repository is still in the installation but is no longer a fork:
+        # its upstream was deleted and GitHub promoted the fork to a standalone
+        # repository (or it was detached). Never treat this as "gone" or remove
+        # it — the fork and its history are intact and keep updating themselves.
+        if row["upstream_gone"] and row["status"] == "needs_attention":
+            _set_repo(db, repo_id, last_check_at=utcnow())
+            return "needs_attention"
+        message = (f"上游仓库已删除，{row['full_name']} 已成为独立仓库；"
+                   "fork 及其历史保留，不会被移除或改动")
+        if row["status"] != "needs_attention" or row["last_error"] != message:
+            log_event(db, repo_id, "blocked", f"{row['full_name']} {message}")
+        _set_repo(db, repo_id, status="needs_attention", upstream_gone=1,
+                  last_check_at=utcnow(), last_error=message)
+        return "needs_attention"
     parent = node.get("parent") or {}
     fork_ref = node.get("defaultBranchRef") or {}
     parent_ref = parent.get("defaultBranchRef") or {}
     if not parent.get("nameWithOwner"):
-        _set_repo(db, repo_id, status="blocked", last_check_at=utcnow(),
-                  last_error="上游仓库不可见")
-        return "blocked"
+        # GitHub still reports the repository as a fork but the parent is gone
+        # (deleted upstream). Same guarantee as above: keep the fork managed.
+        message = (f"上游仓库不可见（可能已删除），{row['full_name']} 保持管理；"
+                   "fork 及其历史不会被移除或改动")
+        if row["status"] != "needs_attention" or row["last_error"] != message:
+            log_event(db, repo_id, "blocked", f"{row['full_name']} {message}")
+        _set_repo(db, repo_id, status="needs_attention", upstream_gone=1,
+                  last_check_at=utcnow(), last_error=message)
+        return "needs_attention"
     if not fork_ref.get("target") or not parent_ref.get("target"):
         _set_repo(db, repo_id, status="blocked", last_check_at=utcnow(),
                   last_error="默认分支不存在")
         return "blocked"
+    version = _version_fields(node, parent)
+    if row["upstream_gone"]:
+        # The upstream is back (re-forked or restored): resume normal tracking.
+        _set_repo(db, repo_id, upstream_gone=0)
     if parent["nameWithOwner"] != row["upstream_full_name"]:
         if row["status"] != "needs_attention":
             log_event(db, repo_id, "blocked",
                       f"{row['full_name']} 的上游变为 {parent['nameWithOwner']}，已暂停等待确认")
         _set_repo(db, repo_id, upstream_full_name=parent["nameWithOwner"],
                   status="needs_attention", last_check_at=utcnow(),
-                  last_error=f"上游变更为 {parent['nameWithOwner']}，请确认后恢复")
+                  last_error=f"上游变更为 {parent['nameWithOwner']}，请确认后恢复", **version)
         return "needs_attention"
     fork_branch, parent_branch = fork_ref["name"], parent_ref["name"]
     if row["mode"] == "manual":
@@ -603,7 +679,7 @@ def sync_one(db, client, row, node, forced=False):
                 upstream_sha = client.get_ref(row["upstream_full_name"], fork_branch)
             except (RateLimited, AuthError):
                 raise
-            except Exception:
+            except RefNotFound:
                 message = (f"上游没有与 fork 默认分支同名的分支 {fork_branch}"
                            f"（上游默认分支为 {parent_branch}），无法自动合并；"
                            "fork 可保持独立更新，如需与上游对齐请在 GitHub 手动处理")
@@ -612,8 +688,18 @@ def sync_one(db, client, row, node, forced=False):
                 _set_repo(db, repo_id, status="needs_attention", last_check_at=utcnow(),
                           last_error=message)
                 return "needs_attention"
+            except Exception as error:
+                # Transient API failure (network, 5xx): report it as an error
+                # instead of falsely claiming the upstream branch is missing.
+                message = f"读取上游分支 {fork_branch} 失败：{str(error)[:200]}"
+                if row["status"] != "error" or row["last_error"] != message:
+                    log_event(db, repo_id, "error", f"{row['full_name']} 检查失败：{message}")
+                _set_repo(db, repo_id, status="error", last_check_at=utcnow(),
+                          last_error=message, **version)
+                return "error"
         status = _sync_manual(db, client, row, fork_branch,
-                              fork_ref["target"]["oid"], upstream_sha, utcnow(), forced)
+                              fork_ref["target"]["oid"], upstream_sha, utcnow(), forced,
+                              version=version)
         if row["self_update_interval"]:
             _self_update(db, client, row, utcnow(), forced)
         return status
@@ -630,7 +716,7 @@ def sync_one(db, client, row, node, forced=False):
         if row["status"] != "needs_attention":
             log_event(db, repo_id, "blocked",
                       f"{row['full_name']} 默认分支变化（{fork_branch} vs {parent_branch}），暂停等待确认")
-        _set_repo(db, repo_id, **fields)
+        _set_repo(db, repo_id, **fields, **version)
         return "needs_attention"
     fork_sha = fork_ref["target"]["oid"]
     upstream_sha = parent_ref["target"]["oid"]
@@ -639,10 +725,11 @@ def sync_one(db, client, row, node, forced=False):
         if row["status"] not in ("synced",):
             log_event(db, repo_id, "synced", f"{row['full_name']} 已与上游一致")
         _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
-                  last_check_at=now, last_success_at=now, last_error=None)
+                  last_check_at=now, last_success_at=now, last_error=None, **version)
         return "synced"
     if row["status"] == "diverged" and row["diverged_upstream_sha"] == upstream_sha:
-        _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha, upstream_sha=upstream_sha)
+        _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha, upstream_sha=upstream_sha,
+                  **version)
         return "diverged"
     try:
         client.update_ref(row["full_name"], row["branch"], upstream_sha)
@@ -650,22 +737,23 @@ def sync_one(db, client, row, node, forced=False):
         if confirmed != upstream_sha:
             raise RuntimeError(f"推送后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
         _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
-                  last_check_at=utcnow(), last_success_at=utcnow(), last_error=None)
+                  last_check_at=utcnow(), last_success_at=utcnow(), last_error=None, **version)
         log_event(db, repo_id, "synced",
                   f"{row['full_name']} 快进到 {upstream_sha[:12]}")
         return "synced"
     except RefNotFastForward:
-        _classify_non_ff(db, client, row, upstream_sha)
+        _classify_non_ff(db, client, row, upstream_sha, version)
         return "blocked"
     except Forbidden as error:
-        return _classify_forbidden(db, client, row, upstream_sha, error)
+        return _classify_forbidden(db, client, row, upstream_sha, error, version)
     except (RateLimited, AuthError):
         raise
     except Exception as error:  # per-repo isolation: other repos continue
         message = str(error)[:300]
         if row["status"] != "error" or row["last_error"] != message:
             log_event(db, repo_id, "error", f"{row['full_name']} 同步失败：{message}")
-        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message)
+        _set_repo(db, repo_id, status="error", last_check_at=utcnow(), last_error=message,
+                  **version)
         return "error"
 
 

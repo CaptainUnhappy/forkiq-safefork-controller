@@ -22,6 +22,10 @@ class RefNotFastForward(RuntimeError):
     pass
 
 
+class RefNotFound(RuntimeError):
+    """The requested ref (branch/tag) does not exist in the repository."""
+
+
 class Forbidden(RuntimeError):
     """403 on a ref update: missing App permission (e.g. workflows) or blocked."""
 
@@ -130,7 +134,10 @@ class GitHub:
         return payload
 
     def get_ref(self, full_name, branch):
-        _, payload = self._api("GET", f"/repos/{full_name}/git/ref/heads/{branch}")
+        status, payload = self._api("GET", f"/repos/{full_name}/git/ref/heads/{branch}",
+                                    ok=(200, 404))
+        if status == 404:
+            raise RefNotFound(f"{full_name} 没有分支 {branch}")
         return payload["object"]["sha"]
 
     def update_ref(self, full_name, branch, sha):

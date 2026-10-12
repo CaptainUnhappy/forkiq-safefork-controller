@@ -13,7 +13,8 @@ Keep forks current with upstream and make synchronization failures actionable.
 ## Capabilities and Constraints
 FastAPI and server-rendered Jinja templates. GitHub App authentication, discovery,
 mirror synchronization, history-preserving upstream merges, optional workflow
-keepalive, repository controls, events and administrator settings already exist.
+keepalive, repository controls, events, per-repository local/upstream version
+display (latest tag, short SHA, commit date) and administrator settings already exist.
 The redesign preserves all server actions, CSRF protections, password-only panel
 login, existing credentials and repository configuration. No real credentials
 belong in source, fixtures or documentation.

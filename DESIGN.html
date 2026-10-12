@@ -192,6 +192,9 @@ components:
 <p>筛选链接使用白底细边框，当前项与悬停均使用浅绿底及绿色边框。状态标签保持中文语义：成功和待同步使用绿色组，分叉、阻塞和错误使用红色组，认证事件使用警告组，其他状态使用中性组。</p>
 <h3>External links</h3>
 <p>仓库名与上游名以文本链接直接指向 <code>https://github.com/&lt;owner&gt;/&lt;repo&gt;</code>，在仓库列表、仓库详情与概览事件中保持一致。仓库列表保留仓库名的面板内详情链接，其右侧用图标入口打开 GitHub，图标为（13px）、<code>rounded.tag</code>、白底细边框，悬停转为浅绿底与主色边框。外部链接统一使用 <code>target="_blank"</code> 与 <code>rel="noopener"</code>；名称缺失时显示 <code>—</code>，不生成空链接。</p>
+<h3>Versions</h3>
+<p>仓库列表新增「版本」列，仓库详情用「上游版本」「fork 版本」两行展示。每侧版本由 <code>version_chip</code> 宏渲染：最近标签（存在时，绿色 <code>tag-version</code>）、12 位短 SHA（<code>mono</code>）与提交日期（<code>version-date</code>，<code>muted</code>）。列表列内以「本地 / 上游」两行并排（<code>version-row</code>）；标签取自各默认分支可达的最新标签，缺失时省略而不占位。版本信息随每次检查从同一批 GraphQL 节点更新，不额外增加请求。</p>
+<p>仓库不再与上游相连（上游被删除、fork 被提升为独立仓库）时，仓库名或上游名后追加琥珀色 <code>tag-warn</code> 标签「上游已删除」，并保留在管理列表中，不自动移除。</p>
 <h3>Cards / Containers</h3>
 <p>卡片使用统一背景、圆角和轻阴影。表格嵌入卡片，表头与悬停使用 <code>surface</code>；错误提示允许长文本换行，不裁掉定位问题所需的信息。</p>
 <h3>Authentication</h3>

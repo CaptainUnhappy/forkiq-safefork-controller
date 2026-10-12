@@ -221,6 +221,40 @@ class WebTests(unittest.TestCase):
                                   if link["attrs"].get("href") == "https://github.com/None"])
                 self.assertIn("—", response.text)
 
+    def test_repository_versions_show_tag_short_sha_and_date(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        self.main.db.run(
+            "UPDATE repositories SET fork_sha=?, upstream_sha=?, fork_tag=?, upstream_tag=?, "
+            "fork_commit_at=?, upstream_commit_at=? WHERE id=?",
+            ("a" * 40, "b" * 40, "v1.2.3", "v9.9.9",
+             "2026-01-02T03:04:05Z", "2026-02-03T04:05:06Z", repo_id))
+        for path in ("/repos", f"/repos/{repo_id}"):
+            with self.subTest(path=path):
+                response, page = self.rendered_page(path)
+                # Both sides expose tag, a readable 12-char SHA and commit date.
+                for tag, sha, date in (("v1.2.3", "a" * 12, "2026-01-02"),
+                                       ("v9.9.9", "b" * 12, "2026-02-03")):
+                    self.assertIn(tag, response.text)
+                    self.assertIn(sha, response.text)
+                    self.assertIn(date, response.text)
+                # The full 40-char SHA is no longer dumped on the detail page.
+                if path != "/repos":
+                    self.assertNotIn("a" * 40, response.text)
+
+    def test_static_assets_use_content_hash_cache_buster(self):
+        self.setup_admin()
+        response, page = self.rendered_page("/repos")
+        expected = self.main.ASSET_VERSION
+        self.assertEqual(len(expected), 10)
+        for element, attr in (("link", "href"), ("script", "src")):
+            urls = [item["attrs"].get(attr, "") for item in page.find(element)]
+            asset = [url for url in urls if "/static/app." in url]
+            self.assertTrue(asset, element)
+            self.assertTrue(any(url.endswith(f"?v={expected}") for url in asset), asset)
+
     def test_repository_detail_preserves_paused_actions_and_hidden_enabled(self):
         token = self.setup_admin()
         from app.db import insert_repository

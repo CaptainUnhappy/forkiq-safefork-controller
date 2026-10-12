@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS repositories(
   status TEXT NOT NULL DEFAULT 'pending',
   upstream_sha TEXT,
   fork_sha TEXT,
+  upstream_tag TEXT,
+  fork_tag TEXT,
+  upstream_commit_at TEXT,
+  fork_commit_at TEXT,
+  upstream_gone INTEGER NOT NULL DEFAULT 0,
   last_success_at TEXT,
   last_check_at TEXT,
   last_error TEXT,
@@ -77,6 +82,16 @@ class DB:
                 conn.execute("ALTER TABLE repositories ADD COLUMN self_update TEXT")
             if "self_update_interval" not in columns:
                 conn.execute("ALTER TABLE repositories ADD COLUMN self_update_interval INTEGER")
+            if "upstream_tag" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_tag TEXT")
+            if "fork_tag" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN fork_tag TEXT")
+            if "upstream_commit_at" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_commit_at TEXT")
+            if "fork_commit_at" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN fork_commit_at TEXT")
+            if "upstream_gone" not in columns:
+                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_gone INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
     def run(self, sql, params=()):

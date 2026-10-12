@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-12T00:55:54.961402Z",
+  "generatedAt": "2026-10-12T06:27:36.117998Z",
   "title": "Design System: ForkIQ",
   "extensions": {
     "shadows": [
@@ -98,6 +98,14 @@
       "description": "承载工作区内容的轻阴影容器。",
       "html": "<section class=\"ds-card\"><h2>仓库状态</h2><p>查看同步状态与事件。</p></section>",
       "css": ".ds-card{background:var(--card,#fff);color:var(--ink,#303732);border-radius:var(--radius,10px);padding:24px;box-shadow:var(--shadow,0 3px 16px rgba(32,48,39,.06));font:14px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif}.ds-card h2{margin:0 0 16px;font-size:16px;line-height:1.5;font-weight:600}.ds-card p{margin:0}@media(max-width:760px){.ds-card{padding:20px 16px}}"
+    },
+    {
+      "name": "仓库版本",
+      "kind": "chip",
+      "refersTo": "version-chip",
+      "description": "展示一侧（本地或上游）的版本：最新标签、12 位短 SHA 与提交日期；标签缺失时省略。",
+      "html": "<span class=\"ds-version-chip\"><span class=\"ds-tag-version\">v1.2.3</span><span class=\"ds-version-sha\">a1b2c3d4e5f6</span><span class=\"ds-version-date\">2026-01-02</span></span>",
+      "css": ".ds-version-chip{display:inline-flex;align-items:center;gap:6px}.ds-version-chip .ds-tag-version{color:var(--primary,#078747);border:1px solid var(--primary,#078747);background:var(--primary-soft,#e8f6ed);border-radius:4px;padding:0 5px;font-size:10px}.ds-version-chip .ds-version-sha{font:12px/1.6 \"SFMono-Regular\",Consolas,monospace;overflow-wrap:anywhere}.ds-version-chip .ds-version-date{color:var(--muted,#66726a);font-size:11px}"
     },
     {
       "name": "GitHub 外链入口",

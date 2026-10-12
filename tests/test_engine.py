@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import engine
 from app.db import DB, insert_repository
-from app.github import RefNotFastForward
+from app.github import RefNotFastForward, RefNotFound
 
 
 def node(node_id, fork_full, upstream_full, fork_sha, upstream_sha, branch="main",
@@ -18,10 +18,16 @@ def node(node_id, fork_full, upstream_full, fork_sha, upstream_sha, branch="main
     return {
         "id": node_id, "nameWithOwner": fork_full, "isFork": is_fork, "isArchived": archived,
         "defaultBranchRef": {"name": fork_branch or branch,
-                             "target": {"oid": fork_sha} if fork_sha else None},
+                             "target": {"oid": fork_sha,
+                                        "committedDate": "2026-01-02T03:04:05Z"}
+                             if fork_sha else None},
+        "refs": {"nodes": [{"name": "v1.2.3"}]},
         "parent": {"nameWithOwner": upstream_full,
                    "defaultBranchRef": {"name": parent_branch or branch,
-                                        "target": {"oid": upstream_sha} if upstream_sha else None}}
+                                        "target": {"oid": upstream_sha,
+                                                   "committedDate": "2026-02-03T04:05:06Z"}
+                                        if upstream_sha else None},
+                   "refs": {"nodes": [{"name": "v9.9.9"}]}}
         if upstream_full else None,
     }
 
@@ -35,6 +41,7 @@ class StubGitHub:
         self.installation = []   # repo dicts for discover
         self.calls = []
         self.ref_error = {}      # full_name -> exception
+        self.get_ref_error = {}  # full_name -> exception (transient read failure)
         self.compare_result = {"ahead_by": 0, "behind_by": 0}
         self.compare_error = False
         self.merge_result = {"merge_type": "merge", "message": "merged"}
@@ -65,6 +72,10 @@ class StubGitHub:
 
     def get_ref(self, full_name, branch):
         self.calls.append(("get_ref", full_name))
+        if full_name in self.get_ref_error:
+            raise self.get_ref_error[full_name]
+        if full_name not in self.refs:
+            raise RefNotFound(f"{full_name} 没有分支 {branch}")
         return self.refs[full_name]
 
     def compare(self, fork_full, base, head):
@@ -151,6 +162,27 @@ class EngineTests(unittest.TestCase):
         engine.run_cycle(self.db, self.client)
         self.assertEqual(self.status(), "synced")
         self.assertFalse(any(c[0] == "update_ref" for c in self.client.calls))
+
+    def test_cycle_records_tags_and_commit_dates(self):
+        # The version columns come from the same batched GraphQL node: the
+        # newest tag per side plus each default-branch head's commit date.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.refs["me/demo"] = "a" * 40
+        engine.run_cycle(self.db, self.client)
+        row = self.row()
+        self.assertEqual(row["fork_tag"], "v1.2.3")
+        self.assertEqual(row["upstream_tag"], "v9.9.9")
+        self.assertEqual(row["fork_commit_at"], "2026-01-02T03:04:05Z")
+        self.assertEqual(row["upstream_commit_at"], "2026-02-03T04:05:06Z")
+
+    def test_cycle_records_versions_without_tags(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
+        self.client.nodes["N1"]["refs"] = {"nodes": []}
+        self.client.nodes["N1"]["parent"]["refs"] = {"nodes": []}
+        engine.run_cycle(self.db, self.client)
+        row = self.row()
+        self.assertIsNone(row["fork_tag"])
+        self.assertIsNone(row["upstream_tag"])
 
     def test_behind_fast_forwards_with_force_false_and_verifies(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
@@ -310,12 +342,53 @@ class EngineTests(unittest.TestCase):
     def test_parent_removed_blocks(self):
         self.client.nodes["N1"] = node("N1", "me/demo", None, "a" * 40, None)
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "blocked")
+        # Upstream deleted: the fork is kept (never removed) and flagged for
+        # attention, with its history intact.
+        self.assertEqual(self.status(), "needs_attention")
+        self.assertEqual(self.row()["upstream_gone"], 1)
+        self.assertIn("上游仓库不可见", self.row()["last_error"])
 
     def test_not_a_fork_blocks(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40, is_fork=False)
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "blocked")
+        # Upstream deleted and the fork promoted to standalone: keep managing it.
+        self.assertEqual(self.status(), "needs_attention")
+        self.assertEqual(self.row()["upstream_gone"], 1)
+        self.assertIn("上游仓库已删除", self.row()["last_error"])
+        self.assertFalse(any(c[0] == "update_ref" for c in self.client.calls))
+
+    def test_deleted_upstream_fork_is_never_removed_and_recovers(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40, is_fork=False)
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "needs_attention")
+        # Repeated cycles keep the row and stay quiet (no duplicate events).
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM repositories")["n"], 1)
+        self.assertEqual(self.status(), "needs_attention")
+        # Upstream reappears (re-forked): the flag clears and sync resumes.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
+        self.db.run("UPDATE repositories SET status='pending', sync_requested=1 WHERE id=?",
+                    (self.repo_id,))
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.row()["upstream_gone"], 0)
+        self.assertEqual(self.status(), "synced")
+
+    def test_discover_keeps_fork_whose_upstream_was_deleted(self):
+        # Upstream deleted: the fork stays in the installation but `fork` is now
+        # false. discover must NOT mark it missing or drop it.
+        self.client.installation = [
+            {"full_name": "me/demo", "name": "demo", "fork": False, "archived": False,
+             "default_branch": "main", "node_id": "N1", "owner": {"login": "me"}},
+        ]
+        engine.discover(self.db, self.client)
+        row = self.row()
+        self.assertNotEqual(row["status"], "missing")
+        self.assertEqual(row["upstream_gone"], 1)
+
+    def test_discover_still_marks_really_deleted_fork_missing(self):
+        self.client.installation = []
+        engine.discover(self.db, self.client)
+        self.assertEqual(self.status(), "missing")
 
     def test_upstream_renamed_needs_attention(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "other/demo", "a" * 40, "b" * 40)
@@ -541,6 +614,25 @@ class ManualModeTests(unittest.TestCase):
         self.assertEqual(self.row()["branch"], "master")
         self.assertIn("上游没有与 fork 默认分支同名的分支 master", self.row()["last_error"])
         self.assertFalse(any(c[0] == "merge_upstream" for c in self.client.calls))
+
+    def test_transient_upstream_ref_failure_is_an_error_not_missing_branch(self):
+        # A flaky upstream read (network/5xx) must not be reported as "upstream
+        # has no same-named branch" (the real zzusec/v2ray false alarm).
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
+                                       fork_branch="rm", parent_branch="master")
+        self.client.get_ref_error["up/demo"] = RuntimeError("HTTP 502")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertIn("读取上游分支 rm 失败", self.row()["last_error"])
+        self.assertNotIn("没有与 fork 默认分支同名", self.row()["last_error"])
+
+    def test_missing_upstream_ref_uses_dedicated_not_found_error(self):
+        # A genuine 404 (branch really absent) is still diagnosed as missing.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
+                                       fork_branch="rm", parent_branch="master")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "needs_attention")
+        self.assertIn("上游没有与 fork 默认分支同名的分支 rm", self.row()["last_error"])
 
 
 class SelfUpdateTests(unittest.TestCase):

@@ -27,6 +27,23 @@ app = FastAPI(title="ForkIQ", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
 
+
+def asset_version(*names):
+    """Content hash for static assets, so a changed file always busts caches.
+
+    A hand-maintained `?v=` string once stayed constant across two deploys and
+    left browsers on stale CSS; deriving it from file contents makes that
+    impossible.
+    """
+    digest = hashlib.sha256()
+    for name in names:
+        digest.update((BASE / "static" / name).read_bytes())
+    return digest.hexdigest()[:10]
+
+
+ASSET_VERSION = asset_version("app.css", "app.js")
+
+
 db = DB(STATE_DIR / "forkiq.db")
 worker = Worker(STATE_DIR, PEM_PATH)
 _login_failures = {}
@@ -70,7 +87,8 @@ def is_secure(request):
 def render(request, name, **context):
     token = request.cookies.get("forkiq_session", "")
     context.update(csrf=csrf_for(token) if token else "",
-                   setup_done=db.get_setting("setup_done") == "1")
+                   setup_done=db.get_setting("setup_done") == "1",
+                   asset_version=ASSET_VERSION)
     return templates.TemplateResponse(request, name, context)
 
 
