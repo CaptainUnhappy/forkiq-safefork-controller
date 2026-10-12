@@ -123,10 +123,7 @@ tr:hover td { background: var(--surface); }
 .repos { min-width: 740px; }
 .repos td:first-child { font-weight: 500; }
 .repos td:nth-child(2) { overflow-wrap: anywhere; }
-.version-cell { white-space: nowrap; }
-.version-row { display: flex; align-items: center; gap: 6px; }
-.version-row + .version-row { margin-top: 3px; }
-.version-side { color: var(--muted); font-size: 11px; min-width: 24px; }
+.version-line { margin-top: 4px; white-space: nowrap; }
 .version-chip { display: inline-flex; align-items: center; gap: 6px; }
 .version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
 .version-chip .version-date { font-size: 11px; }
@@ -250,12 +247,11 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   .repos td, .events td { display: block; padding: 0; border: 0; min-width: 0; overflow-wrap: anywhere; }
   .repos td { grid-column: 1 / -1; }
   .repos td:first-child { font-size: 14px; }
-  .repos td:nth-child(4) { grid-row: 2; }
+  .repos td:nth-child(3) { grid-row: 2; }
   .repos td:nth-child(2) { grid-row: 3; }
-  .repos td:nth-child(3) { grid-row: 4; }
   .repos td[data-label] { font-size: 11px; white-space: normal; }
   .repos td[data-label]::before { content: attr(data-label) "："; }
-  .repos td.version-cell { white-space: nowrap; }
+  .repos .version-line { white-space: nowrap; }
   .events td:first-child { grid-column: 1 / -1; font-size: 11px; }
   .events td:nth-child(3) { grid-column: 2; grid-row: 2; font-size: 12px; }
   .events td:last-child { grid-column: 1 / -1; font-size: 12px; }
