@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon, status, event_kind %}
+{% from "components.html" import icon, status, event_kind, repo_link, github_link %}
 {% set active_page = "repos" %}
 {% set page_icon = "folder-git-2" %}
 {% set auto_refresh = true %}
@@ -31,8 +31,8 @@
         <tr><th>仓库</th><th>上游</th><th>状态</th><th>最近检查</th></tr>
         {% for r in repos %}
         <tr>
-          <td><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{% if r.mode == 'manual' %}<span class="tag">手工</span>{% endif %}{% if r.self_update_interval %}<span class="tag">自更新</span>{% endif %}{% if r.discovered %}<span class="tag">自动发现</span>{% endif %}</td>
-          <td class="muted" data-label="上游">{{ r.upstream_full_name or '—' }}</td>
+          <td><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.mode == 'manual' %}<span class="tag">手工</span>{% endif %}{% if r.self_update_interval %}<span class="tag">自更新</span>{% endif %}{% if r.discovered %}<span class="tag">自动发现</span>{% endif %}</td>
+          <td class="muted" data-label="上游">{{ repo_link(r.upstream_full_name) }}</td>
           <td>{{ status(r.status) }}
               {% if r.last_error %}<div class="err-hint">{{ r.last_error }}</div>{% endif %}</td>
           <td class="muted" data-label="最近检查">{{ r.last_check_at or '—' }}</td>

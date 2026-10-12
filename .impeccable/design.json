@@ -98,6 +98,14 @@
       "description": "承载工作区内容的轻阴影容器。",
       "html": "<section class=\"ds-card\"><h2>仓库状态</h2><p>查看同步状态与事件。</p></section>",
       "css": ".ds-card{background:var(--card,#fff);color:var(--ink,#303732);border-radius:var(--radius,10px);padding:24px;box-shadow:var(--shadow,0 3px 16px rgba(32,48,39,.06));font:14px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif}.ds-card h2{margin:0 0 16px;font-size:16px;line-height:1.5;font-weight:600}.ds-card p{margin:0}@media(max-width:760px){.ds-card{padding:20px 16px}}"
+    },
+    {
+      "name": "GitHub 外链入口",
+      "kind": "link",
+      "refersTo": "link-external",
+      "description": "在仓库名旁打开对应 GitHub 页面的图标入口，另开标签页并保留无 JavaScript 语义。",
+      "html": "<a class=\"ds-ext-link\" href=\"https://github.com/zzusec/hideck\" target=\"_blank\" rel=\"noopener\" aria-label=\"在 GitHub 打开 fork zzusec/hideck\" title=\"在 GitHub 打开 fork\">↗</a>",
+      "css": ".ds-ext-link{display:inline-flex;align-items:center;vertical-align:middle;margin-left:6px;padding:3px;border:1px solid var(--line,#e3e8e4);border-radius:4px;color:var(--muted,#66726a);background:var(--card,#fff);text-decoration:none}.ds-ext-link:hover{color:var(--primary,#078747);border-color:var(--primary,#078747);background:var(--primary-soft,#e8f6ed)}"
     }
   ]
 }

@@ -11,3 +11,11 @@
 {% set labels = {'synced': '同步完成', 'discover': '发现仓库', 'blocked': '同步阻塞', 'error': '错误', 'auth': '认证', 'check': '检查', 'merge': '合并', 'selfupdate': '自更新'} %}
 <span class="badge kind-{{ value }}" title="{{ value }}">{{ labels.get(value, value) }}</span>
 {%- endmacro %}
+
+{% macro repo_link(full_name) -%}
+{% if full_name %}<a href="https://github.com/{{ full_name }}" target="_blank" rel="noopener">{{ full_name }}</a>{% else %}—{% endif %}
+{%- endmacro %}
+
+{% macro github_link(full_name, label='在 GitHub 打开') -%}
+{% if full_name %}<a class="ext-link" href="https://github.com/{{ full_name }}" target="_blank" rel="noopener" aria-label="{{ label }} {{ full_name }}" title="{{ label }}">{{ icon('arrow-right') }}</a>{% endif %}
+{%- endmacro %}

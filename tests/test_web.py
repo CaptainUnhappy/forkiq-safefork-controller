@@ -176,6 +176,51 @@ class WebTests(unittest.TestCase):
         self.assertIn("GitHub denied &lt;unsafe&gt;", response.text)
         self.assertNotIn("<unsafe>", response.text)
 
+    def test_repository_and_upstream_names_link_to_github(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        self.main.db.run("INSERT INTO events(repo_id, at, kind, message) VALUES(?,?,?,?)",
+                         (repo_id, "2026-01-01T00:00:00+00:00", "synced", "me/demo 已与上游一致"))
+        # The upstream name is a GitHub link everywhere it is shown.
+        for path in ("/repos", f"/repos/{repo_id}"):
+            with self.subTest(path=path, target="up/demo"):
+                _, page = self.rendered_page(path)
+                links = page.find("a", href="https://github.com/up/demo")
+                self.assertEqual(len(links), 1, path)
+                self.assertEqual(links[0]["attrs"].get("target"), "_blank")
+                self.assertIn("noopener", links[0]["attrs"].get("rel", ""))
+        # On the overview event log the repository column also links to GitHub.
+        _, page = self.rendered_page("/")
+        repo_links = page.find("a", href="https://github.com/me/demo")
+        self.assertEqual(len(repo_links), 1)
+        self.assertEqual(repo_links[0]["attrs"].get("target"), "_blank")
+        # The repository list keeps its internal detail link and adds GitHub links.
+        _, page = self.rendered_page("/repos")
+        self.assertTrue(page.find("a", href=f"/repos/{repo_id}"))
+        fork_links = page.find("a", href="https://github.com/me/demo")
+        self.assertEqual(len(fork_links), 1)
+        self.assertEqual(fork_links[0]["attrs"].get("target"), "_blank")
+        # The detail page exposes both names.
+        _, page = self.rendered_page(f"/repos/{repo_id}")
+        self.assertTrue(page.find("a", href="https://github.com/me/demo"))
+        self.assertTrue(page.find("a", href="https://github.com/up/demo"))
+
+    def test_github_links_omit_missing_names(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name=None)
+        for path in ("/repos", f"/repos/{repo_id}"):
+            with self.subTest(path=path):
+                response, page = self.rendered_page(path)
+                # The fork itself still links; only the missing upstream is a dash.
+                self.assertEqual(len(page.find("a", href="https://github.com/me/demo")), 1)
+                self.assertFalse([link for link in page.find("a")
+                                  if link["attrs"].get("href") == "https://github.com/None"])
+                self.assertIn("—", response.text)
+
     def test_repository_detail_preserves_paused_actions_and_hidden_enabled(self):
         token = self.setup_admin()
         from app.db import insert_repository

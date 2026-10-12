@@ -129,6 +129,9 @@ tr:hover td { background: var(--surface); }
 .s-diverged, .s-blocked, .s-error, .s-needs_attention, .kind-blocked, .kind-error { background: var(--danger-soft); color: var(--red); }
 .kind-auth { background: var(--warning-soft); color: var(--amber); }
 .tag { display: inline-block; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; font-size: 10px; font-weight: 400; white-space: nowrap; }
+.ext-link { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 6px; padding: 3px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--card); }
+.ext-link:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); text-decoration: none; }
+.ext-link .icon { width: 13px; height: 13px; }
 .notice, .error { border-radius: 6px; padding: 12px 14px; margin-bottom: 20px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .notice { color: var(--primary); background: var(--primary-soft); }
 .notice.warn { color: var(--amber); background: var(--warning-soft); }

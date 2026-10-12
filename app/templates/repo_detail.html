@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon, status, event_kind %}
+{% from "components.html" import icon, status, event_kind, repo_link, github_link %}
 {% set active_page = "repos" %}
 {% set page_icon = "folder-git-2" %}
 {% block title %}ForkIQ · 仓库{% endblock %}
@@ -9,7 +9,8 @@
     <a class="back-link" href="/repos">{{ icon("chevron-right") }}返回仓库列表</a>
     <section class="card">
       <dl class="kv">
-        <dt>上游</dt><dd>{{ repo.upstream_full_name or '—' }}</dd>
+        <dt>仓库</dt><dd>{{ repo_link(repo.full_name) }}</dd>
+        <dt>上游</dt><dd>{{ repo_link(repo.upstream_full_name) }}</dd>
         <dt>同步分支</dt><dd>{{ repo.branch }}</dd>
         <dt>同步方式</dt>
         <dd>{% if repo.mode == 'manual' %}手工 fork：保留 fork 自有提交，上游更新自动合并；fork 自己的 Actions 可独立更新内容，不依赖上游是否开启 Actions
