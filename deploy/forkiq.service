@@ -1,0 +1,42 @@
+[Unit]
+Description=ForkIQ GitHub fork sync panel
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=forkiq
+Group=forkiq
+WorkingDirectory=/opt/forkiq
+# Reachable only through Nginx Proxy Manager: ufw allows 8792 from the docker
+# subnets and denies it everywhere else (never exposed on the public internet).
+ExecStart=/opt/forkiq/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8792 --workers 1
+Environment=FORKIQ_STATE_DIR=/var/lib/forkiq
+# App private key lives in the service's own state dir: the sandbox makes /etc
+# read-only, and the manifest callback must write the PEM at runtime.
+Environment=FORKIQ_PEM_PATH=/var/lib/forkiq/app.pem
+Environment=PYTHONUNBUFFERED=1
+TimeoutStopSec=10s
+KillMode=control-group
+UMask=0077
+Nice=5
+CPUQuota=25%
+MemoryHigh=160M
+MemoryMax=224M
+TasksMax=64
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/forkiq
+
+[Install]
+WantedBy=multi-user.target

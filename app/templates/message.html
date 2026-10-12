@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}ForkIQ{% endblock %}
+{% block bodyclass %}split{% endblock %}
+{% block body %}
+<div class="split-left">
+  <div class="brand">ForkIQ</div>
+</div>
+<div class="split-right">
+  <div class="card auth-card">
+    <h2>{{ title }}</h2>
+    <p class="muted">{{ body }}</p>
+    <a class="primary link" href="/">返回面板</a>
+  </div>
+</div>
+{% endblock %}

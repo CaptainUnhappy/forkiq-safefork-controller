@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}ForkIQ · 设置管理员密码{% endblock %}
+{% block bodyclass %}split{% endblock %}
+{% block body %}
+<div class="split-left">
+  <div class="brand">ForkIQ</div>
+  <h1 class="hero">把上游更新、同步证据和异常仓库放在一个清晰的工作台。</h1>
+  <ul class="feature-list">
+    <li>粘贴 fork 链接即可加入自动同步</li>
+    <li>自动发现账号下新 fork，快速跟进上游</li>
+    <li>分叉与阻塞绝不覆盖，永远可解释</li>
+  </ul>
+  <div class="footnote">基于 GitHub App 的最小权限访问，不保存你的账号密码。</div>
+</div>
+<div class="split-right">
+  <form class="card auth-card" method="post" action="/setup">
+    <span class="chip">首次安装</span>
+    <h2>设置管理员密码</h2>
+    <p class="muted">用于登录本管理面板。密码至少 8 位。</p>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <label>管理员密码<input type="password" name="password" autocomplete="new-password" required></label>
+    <label>再次输入<input type="password" name="password2" autocomplete="new-password" required></label>
+    <button class="primary" type="submit">继续连接 GitHub</button>
+  </form>
+</div>
+{% endblock %}

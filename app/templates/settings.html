@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}ForkIQ · 设置{% endblock %}
+{% block body %}
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand small">ForkIQ</div>
+    <nav>
+      <a href="/">概览</a>
+      <a href="/repos">仓库</a>
+      <a class="active" href="/settings">设置</a>
+    </nav>
+    <form method="post" action="/logout" class="logout"><button class="ghost">退出登录</button></form>
+  </aside>
+  <main class="content">
+    <header class="page-head"><h1>设置</h1></header>
+    {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+    {% if auth_error %}<div class="notice warn">GitHub 认证异常：{{ auth_error }}</div>{% endif %}
+    <section class="card">
+      <h2>同步</h2>
+      <form method="post" action="/settings">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>检查间隔（秒，15–300）<input type="number" name="interval" value="{{ interval }}" min="15" max="300"></label>
+        <label class="check"><input type="checkbox" name="auto_discover" value="1" {% if auto_discover %}checked{% endif %}> 自动发现新 fork（每小时）</label>
+        <button class="primary">保存</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>GitHub App</h2>
+      {% if app_slug %}
+        <p>App：<strong>{{ app_slug }}</strong>{% if installation_id %} · installation {{ installation_id }}{% else %} · 尚未检测到安装{% endif %}</p>
+        <div class="actions">
+          <a class="secondary link" href="/github/connect">重新连接</a>
+          <form method="post" action="/settings/disconnect" class="confirm"
+                data-confirm="仅断开本面板的连接；App 安装需要在 GitHub 设置里卸载。继续？">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="danger">断开连接</button></form>
+        </div>
+      {% else %}
+        <p class="muted">尚未连接。前往 <a href="/github/connect">连接 GitHub</a>。</p>
+      {% endif %}
+    </section>
+    <section class="card">
+      <h2>修改管理员密码</h2>
+      <form method="post" action="/settings/password">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>当前密码<input type="password" name="current" autocomplete="current-password" required></label>
+        <label>新密码<input type="password" name="password" autocomplete="new-password" required></label>
+        <label>再次输入<input type="password" name="password2" autocomplete="new-password" required></label>
+        <button class="primary">更新密码</button>
+      </form>
+    </section>
+  </main>
+</div>
+<script>
+document.querySelectorAll('form.confirm').forEach(f => f.addEventListener('submit', e => {
+  if (!confirm(f.dataset.confirm)) e.preventDefault();
+}));
+</script>
+{% endblock %}

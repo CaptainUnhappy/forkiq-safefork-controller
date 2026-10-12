@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}ForkIQ · 概览{% endblock %}
+{% block body %}
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand small">ForkIQ</div>
+    <nav>
+      <a class="active" href="/">概览</a>
+      <a href="/repos">仓库</a>
+      <a href="/settings">设置</a>
+    </nav>
+    <form method="post" action="/logout" class="logout"><button class="ghost">退出登录</button></form>
+  </aside>
+  <main class="content">
+    <header class="page-head">
+      <h1>概览</h1>
+      <form method="post" action="/discover"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="secondary">立即发现新 fork</button></form>
+    </header>
+    {% if not app_connected %}
+      <div class="notice warn">尚未连接 GitHub App。<a href="/github/connect">现在连接</a></div>
+    {% endif %}
+    {% if auth_error %}<div class="notice warn">GitHub 认证异常：{{ auth_error }}</div>{% endif %}
+    <section class="stats">
+      <div class="stat card"><span class="num">{{ total }}</span><span class="label">受管仓库</span></div>
+      <div class="stat card ok"><span class="num">{{ synced }}</span><span class="label">已同步</span></div>
+      <div class="stat card"><span class="num">{{ behind }}</span><span class="label">待同步</span></div>
+      <div class="stat card warn"><span class="num">{{ blocked }}</span><span class="label">需关注</span></div>
+      <div class="stat card"><span class="num">{{ paused }}</span><span class="label">已暂停</span></div>
+    </section>
+    <section class="card">
+      <h2>最近事件</h2>
+      {% if events %}
+      <table class="events">
+        <tr><th>时间</th><th>类型</th><th>仓库</th><th>说明</th></tr>
+        {% for e in events %}
+        <tr><td class="muted">{{ e.at }}</td><td><span class="badge kind-{{ e.kind }}">{{ e.kind }}</span></td>
+            <td>{{ e.full_name or '—' }}</td><td>{{ e.message }}</td></tr>
+        {% endfor %}
+      </table>
+      {% else %}<p class="muted">还没有事件。连接 GitHub 后会自动开始检查。</p>{% endif %}
+    </section>
+  </main>
+</div>
+<script>setTimeout(() => location.reload(), 30000);</script>
+{% endblock %}

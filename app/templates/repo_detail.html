@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}ForkIQ · {{ repo.full_name }}{% endblock %}
+{% block body %}
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand small">ForkIQ</div>
+    <nav>
+      <a href="/">概览</a>
+      <a class="active" href="/repos">仓库</a>
+      <a href="/settings">设置</a>
+    </nav>
+    <form method="post" action="/logout" class="logout"><button class="ghost">退出登录</button></form>
+  </aside>
+  <main class="content">
+    <header class="page-head">
+      <h1>{{ repo.full_name }}</h1>
+      <span class="badge s-{{ repo.status }}">{{ repo.status }}</span>
+    </header>
+    <section class="card">
+      <dl class="kv">
+        <dt>上游</dt><dd>{{ repo.upstream_full_name or '—' }}</dd>
+        <dt>同步分支</dt><dd>{{ repo.branch }}</dd>
+        <dt>同步方式</dt>
+        <dd>{% if repo.mode == 'manual' %}手工 fork：保留 fork 自有提交，上游更新自动合并；fork 自己的 Actions 可独立更新内容，不依赖上游是否开启 Actions
+            {% else %}镜像：严格跟随上游，fork 有独有提交时停止并标记分叉{% endif %}</dd>
+        <dt>自更新保活</dt>
+        <dd>{% if repo.self_update_interval %}{{ repo.self_update or '已开启，等待检查' }}
+            {% else %}未开启{% endif %}</dd>
+        <dt>上游 HEAD</dt><dd class="mono">{{ repo.upstream_sha or '—' }}</dd>
+        <dt>fork HEAD</dt><dd class="mono">{{ repo.fork_sha or '—' }}</dd>
+        <dt>最近成功</dt><dd>{{ repo.last_success_at or '—' }}</dd>
+        <dt>最近检查</dt><dd>{{ repo.last_check_at or '—' }}</dd>
+        {% if repo.last_error %}<dt>最近错误</dt><dd class="err-hint">{{ repo.last_error }}</dd>{% endif %}
+        {% if repo.diverged_at %}<dt>分叉于</dt><dd>{{ repo.diverged_at }}（上游 {{ repo.diverged_upstream_sha[:12] if repo.diverged_upstream_sha }}）</dd>{% endif %}
+      </dl>
+      <div class="actions">
+        <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="primary">立即同步</button></form>
+        <form method="post" action="/repos/{{ repo.id }}/mode">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="secondary">{{ '切换为镜像模式' if repo.mode == 'manual' else '切换为手工 fork' }}</button>
+        </form>
+        <form method="post" action="/repos/{{ repo.id }}/selfupdate">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="secondary">{{ '关闭自更新' if repo.self_update_interval else '开启自更新保活' }}</button>
+        </form>
+        {% if repo.enabled and repo.status != 'paused' %}
+        <form method="post" action="/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="secondary">暂停</button></form>
+        {% else %}
+        <form method="post" action="/repos/{{ repo.id }}/resume"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="secondary">恢复</button></form>
+        {% endif %}
+        <form method="post" action="/repos/{{ repo.id }}/actions">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="enabled" value="{{ '1' if repo.actions_disabled else '0' }}">
+          <button class="secondary">{{ '启用 Actions' if repo.actions_disabled else '禁用 Actions' }}</button>
+        </form>
+        <form method="post" action="/repos/{{ repo.id }}/remove" class="confirm"
+              data-confirm="仅从管理列表移除，不会改动 GitHub 上的仓库。确认移除？">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="danger">移除管理</button></form>
+      </div>
+    </section>
+    <section class="card">
+      <h2>事件历史</h2>
+      {% if events %}
+      <table class="events">
+        <tr><th>时间</th><th>类型</th><th>说明</th></tr>
+        {% for e in events %}
+        <tr><td class="muted">{{ e.at }}</td><td><span class="badge kind-{{ e.kind }}">{{ e.kind }}</span></td><td>{{ e.message }}</td></tr>
+        {% endfor %}
+      </table>
+      {% else %}<p class="muted">暂无事件。</p>{% endif %}
+    </section>
+  </main>
+</div>
+<script>
+document.querySelectorAll('form.confirm').forEach(f => f.addEventListener('submit', e => {
+  if (!confirm(f.dataset.confirm)) e.preventDefault();
+}));
+</script>
+{% endblock %}
