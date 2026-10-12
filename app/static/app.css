@@ -128,7 +128,7 @@ tr:hover td { background: var(--surface); }
 .version-row + .version-row { margin-top: 3px; }
 .version-side { color: var(--muted); font-size: 11px; min-width: 24px; }
 .version-chip { display: inline-flex; align-items: center; gap: 6px; }
-.version-chip .tag-version { margin-left: 0; color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
 .version-chip .version-date { font-size: 11px; }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }
 .s-synced, .kind-synced, .kind-merge { background: var(--primary-soft); color: var(--green); }
