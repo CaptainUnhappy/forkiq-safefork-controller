@@ -1,6 +1,6 @@
 """SQLite storage for ForkIQ."""
 import sqlite3
-from contextlib import closing
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,52 +61,68 @@ def utcnow():
 class DB:
     def __init__(self, path):
         self.path = str(path)
+        # One connection per thread. Opening a connection and re-issuing
+        # `PRAGMA journal_mode=WAL` for every query meant every read waited on
+        # the write lock that pragma needs; on the shared production host that
+        # turned a 3 ms page into seconds under load.
+        self._local = threading.local()
         self.init()
 
     def connect(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+        self._local.conn = conn
         return conn
 
+    def close(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
     def init(self):
-        with closing(self.connect()) as conn:
-            conn.executescript(SCHEMA)
-            # Additive migrations for databases created before these columns.
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
-            if "mode" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror'")
-            if "last_merged_upstream_sha" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN last_merged_upstream_sha TEXT")
-            if "self_update" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN self_update TEXT")
-            if "self_update_interval" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN self_update_interval INTEGER")
-            if "upstream_tag" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_tag TEXT")
-            if "fork_tag" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN fork_tag TEXT")
-            if "upstream_commit_at" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_commit_at TEXT")
-            if "fork_commit_at" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN fork_commit_at TEXT")
-            if "upstream_gone" not in columns:
-                conn.execute("ALTER TABLE repositories ADD COLUMN upstream_gone INTEGER NOT NULL DEFAULT 0")
-            conn.commit()
+        # The connection is cached for this thread, so it must stay open here.
+        conn = self.connect()
+        # Journal mode is a database property, not a per-connection one.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(SCHEMA)
+        # Additive migrations for databases created before these columns.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
+        if "mode" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror'")
+        if "last_merged_upstream_sha" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN last_merged_upstream_sha TEXT")
+        if "self_update" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN self_update TEXT")
+        if "self_update_interval" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN self_update_interval INTEGER")
+        if "upstream_tag" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN upstream_tag TEXT")
+        if "fork_tag" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN fork_tag TEXT")
+        if "upstream_commit_at" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN upstream_commit_at TEXT")
+        if "fork_commit_at" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN fork_commit_at TEXT")
+        if "upstream_gone" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN upstream_gone INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
 
     def run(self, sql, params=()):
-        with closing(self.connect()) as conn:
-            cur = conn.execute(sql, params)
-            conn.commit()
-            return cur
+        conn = self.connect()
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur
 
     def one(self, sql, params=()):
-        with closing(self.connect()) as conn:
-            return conn.execute(sql, params).fetchone()
+        return self.connect().execute(sql, params).fetchone()
 
     def all(self, sql, params=()):
-        with closing(self.connect()) as conn:
-            return conn.execute(sql, params).fetchall()
+        return self.connect().execute(sql, params).fetchall()
 
     def get_setting(self, key, default=None):
         row = self.one("SELECT value FROM settings WHERE key=?", (key,))

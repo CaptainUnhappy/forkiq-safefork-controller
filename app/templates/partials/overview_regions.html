@@ -1,0 +1,20 @@
+{% from "components.html" import event_kind, repo_link %}
+<section class="stats card" id="stats-region" data-revision="{{ revision }}">
+  <div class="stat"><span class="num">{{ total }}</span><span class="label">受管仓库</span></div>
+  <div class="stat ok"><span class="num">{{ synced }}</span><span class="label">已同步</span></div>
+  <div class="stat"><span class="num">{{ behind }}</span><span class="label">待同步</span></div>
+  <div class="stat warn"><span class="num">{{ blocked }}</span><span class="label">需关注</span></div>
+  <div class="stat"><span class="num">{{ paused }}</span><span class="label">已暂停</span></div>
+</section>
+<section class="card" id="events-region">
+  <h2>最近事件</h2>
+  {% if events %}
+  <div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events" data-columns="4">
+    <tr><th>时间</th><th>类型</th><th>仓库</th><th>说明</th></tr>
+    {% for e in events %}
+    <tr><td class="muted">{{ e.at }}</td><td>{{ event_kind(e.kind) }}</td>
+        <td>{{ repo_link(e.full_name) }}</td><td>{{ e.message }}</td></tr>
+    {% endfor %}
+  </table></div>
+  {% else %}<p class="muted">还没有事件。连接 GitHub 后会自动开始检查。</p>{% endif %}
+</section>

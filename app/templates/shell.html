@@ -26,7 +26,7 @@
       </div>
       <div class="topbar-actions">{% block header_actions %}{% endblock %}</div>
     </header>
-    <main class="content" id="main-content" tabindex="-1" {% if auto_refresh %}data-auto-refresh="30"{% endif %}>{% block content %}{% endblock %}</main>
+    <main class="content" id="main-content" tabindex="-1" {% if auto_refresh %}data-auto-refresh="{{ auto_refresh }}"{% if refresh_region %} data-refresh-region="{{ refresh_region }}"{% endif %}{% endif %}>{% block content %}{% endblock %}</main>
   </div>
 </div>
 {% endblock %}

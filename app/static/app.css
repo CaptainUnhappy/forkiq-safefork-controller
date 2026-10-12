@@ -120,13 +120,32 @@ tr:last-child td { border-bottom: 0; }
 tr:hover td { background: var(--surface); }
 .events { min-width: 640px; }
 .events td:first-child, .repos td:last-child { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
-.repos { min-width: 740px; }
+/* Column widths are set so the five columns fit the panel without the last
+   one sliding under the edge; the version lines wrap instead of widening. */
+.repos { min-width: 760px; table-layout: fixed; }
+.repos th:nth-child(1), .repos td:nth-child(1) { width: 30%; }
+.repos th:nth-child(2), .repos td:nth-child(2) { width: 30%; }
+.repos th:nth-child(3), .repos td:nth-child(3) { width: 17%; }
+.repos th:nth-child(4), .repos td:nth-child(4) { width: 9%; }
+.repos th:nth-child(5), .repos td:nth-child(5) { width: 14%; }
 .repos td:first-child { font-weight: 500; }
 .repos td:nth-child(2) { overflow-wrap: anywhere; }
-.version-line { margin-top: 4px; white-space: nowrap; }
+.version-line { margin-top: 4px; }
 .version-chip { display: inline-flex; align-items: center; gap: 6px; }
+.version-chip .version-side { padding: 0 5px; border-radius: 4px; background: var(--surface); color: var(--muted); font-size: 10px; }
+.version-chip .sha { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.version-chip .sha-behind { color: var(--amber); }
+.version-chip .sha-unsynced { color: var(--red); }
 .version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
 .version-chip .version-date { font-size: 11px; }
+/* One comparison label per row: the two short SHAs above are matched by this. */
+.verdict { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 8px; margin-bottom: 4px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.verdict .verdict-sha { font-size: 11px; font-variant-numeric: tabular-nums; }
+.v-same, .v-contains { background: var(--primary-soft); color: var(--green); }
+.v-behind { background: var(--warning-soft); color: var(--amber); }
+.v-unsynced, .v-gone { background: var(--danger-soft); color: var(--red); }
+.v-pending { background: var(--surface); color: var(--muted); }
+.repos td:nth-child(3) .verdict { display: flex; width: fit-content; }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }
 .s-synced, .kind-synced, .kind-merge { background: var(--primary-soft); color: var(--green); }
 .s-behind, .s-pending, .kind-discover { background: var(--primary-soft); color: var(--primary); }
@@ -241,14 +260,19 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 @media (max-width: 760px) {
   .repos, .events { display: block; min-width: 0; }
   .repos tbody, .events tbody { display: block; }
+  /* Card layout: the desktop column widths must not constrain the stacked rows. */
+  .repos tr:has(td) td { width: auto !important; }
   .repos tr:has(th), .events tr:has(th) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .repos tr:has(td), .events tr:has(td) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 16px 0; border-bottom: 1px solid var(--line); }
   .repos tr:last-child, .events tr:last-child { border-bottom: 0; }
   .repos td, .events td { display: block; padding: 0; border: 0; min-width: 0; overflow-wrap: anywhere; }
   .repos td { grid-column: 1 / -1; }
   .repos td:first-child { font-size: 14px; }
-  .repos td:nth-child(3) { grid-row: 2; }
-  .repos td:nth-child(2) { grid-row: 3; }
+  /* Local and upstream version lines stay adjacent so the two SHAs read as a pair. */
+  .repos td:nth-child(2) { grid-row: 2; }
+  .repos td:nth-child(3) { grid-row: 3; grid-column: 1; }
+  .repos td:nth-child(4) { grid-row: 3; grid-column: 2; }
+  .repos td:nth-child(5) { grid-row: 4; }
   .repos td[data-label] { font-size: 11px; white-space: normal; }
   .repos td[data-label]::before { content: attr(data-label) "："; }
   .repos .version-line { white-space: nowrap; }

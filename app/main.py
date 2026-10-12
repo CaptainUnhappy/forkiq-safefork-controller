@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -16,6 +16,7 @@ from .db import DB, log_event, utcnow
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
 from .github import AuthError, exchange_manifest, write_pem
+from .versions import annotate, fork_tone, version_verdict
 
 STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
 PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", "/var/lib/forkiq/app.pem")
@@ -110,6 +111,12 @@ def check_csrf(request, token):
 @app.on_event("startup")
 def startup():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # Compiling the templates on the first request made the panel's first paint
+    # after every restart take about a second; warm the cache up front instead.
+    for name in ("base.html", "shell.html", "overview.html", "repos.html",
+                 "repo_detail.html", "settings.html", "login.html", "setup.html",
+                 "partials/repo_table.html", "partials/overview_regions.html"):
+        templates.get_template(name)
     worker.start()
 
 
@@ -263,6 +270,10 @@ def overview(request: Request):
     guard = require_login(request)
     if guard:
         return guard
+    return render(request, "overview.html", **_overview_context())
+
+
+def _overview_context():
     stats = {row["status"]: row["n"] for row in
              db.all("SELECT status, COUNT(*) AS n FROM repositories GROUP BY status")}
     total = sum(stats.values())
@@ -272,10 +283,18 @@ def overview(request: Request):
     paused = stats.get("paused", 0)
     events = db.all("SELECT e.*, r.full_name FROM events e LEFT JOIN repositories r ON r.id=e.repo_id "
                     "ORDER BY e.id DESC LIMIT 20")
-    return render(request, "overview.html", stats=stats, total=total, synced=synced,
-                  behind=behind, blocked=blocked, paused=paused, events=events,
-                  auth_error=db.get_setting("auth_error", ""),
-                  app_connected=bool(db.get_setting("github_installation_id")))
+    return {"stats": stats, "total": total, "synced": synced, "behind": behind,
+            "blocked": blocked, "paused": paused, "events": events,
+            "auth_error": db.get_setting("auth_error", ""),
+            "app_connected": bool(db.get_setting("github_installation_id")),
+            "revision": _overview_revision()}
+
+
+def _overview_revision():
+    return _revision("SELECT (SELECT COUNT(*) FROM repositories), "
+                     "(SELECT COALESCE(MAX(updated_at),'') FROM repositories), "
+                     "(SELECT COALESCE(MAX(id),0) FROM events), "
+                     "(SELECT COUNT(*) FROM events)")
 
 
 @app.get("/repos", response_class=HTMLResponse)
@@ -283,14 +302,69 @@ def repo_list(request: Request, filter: str = ""):
     guard = require_login(request)
     if guard:
         return guard
+    return render(request, "repos.html", repos=annotate(_repo_rows(filter)),
+                  filter=filter, revision=_repos_revision(filter))
+
+
+def _repo_rows(filter):
     query = "SELECT * FROM repositories"
     params = ()
     if filter:
         query += " WHERE status=?"
         params = (filter,)
     query += " ORDER BY status='diverged' DESC, status='blocked' DESC, full_name"
-    repos = db.all(query, params)
-    return render(request, "repos.html", repos=repos, filter=filter)
+    return db.all(query, params)
+
+
+def _repos_revision(filter):
+    return _revision(
+        "SELECT COUNT(*), COALESCE(MAX(updated_at),''), COALESCE(MAX(last_check_at),''), "
+        "COALESCE(MAX(status),''), COALESCE(MAX(COALESCE(upstream_gone,0)),0) FROM repositories"
+        + (" WHERE status=?" if filter else ""),
+        (filter,) if filter else ())
+
+
+def _revision(sql, params=()):
+    """Cheap change token from one aggregate query.
+
+    Cloudflare rewrites the HTML it proxies and drops the `ETag` header with
+    it, so a browser can never send `If-None-Match`. The client therefore sends
+    the revision it already has as a query parameter, and an unchanged tick is
+    answered with `204` before any template work happens. `updated_at` is
+    written by every repository update, so it captures any change the fragment
+    could show.
+    """
+    row = db.one(sql, params)
+    return hashlib.sha256(repr(tuple(row)).encode()).hexdigest()[:16]
+
+
+def _fragment(request, name, context, revision):
+    """Render a fragment, or answer 204 when the client already has it."""
+    headers = {"Cache-Control": "no-store", "X-ForkIQ-Revision": revision}
+    if request.query_params.get("v") == revision:
+        return Response(status_code=204, headers=headers)
+    html = templates.get_template(name).render(**context)
+    return HTMLResponse(html, headers=headers)
+
+
+@app.get("/partials/repos", response_class=HTMLResponse)
+def partial_repos(request: Request, filter: str = ""):
+    """Rows only, for the background refresh: no shell, no full page reload."""
+    if not current_session(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    rows = _repo_rows(filter)
+    revision = _repos_revision(filter)
+    return _fragment(request, "partials/repo_table.html",
+                     {"repos": annotate(rows), "revision": revision}, revision)
+
+
+@app.get("/partials/overview", response_class=HTMLResponse)
+def partial_overview(request: Request):
+    """Stats and recent events only, for the overview's background refresh."""
+    if not current_session(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    context = _overview_context()
+    return _fragment(request, "partials/overview_regions.html", context, context["revision"])
 
 
 @app.get("/repos/{repo_id}", response_class=HTMLResponse)
@@ -302,7 +376,9 @@ def repo_detail(request: Request, repo_id: int):
     if not repo:
         return render(request, "message.html", title="未找到", body="仓库不在管理列表中。")
     events = db.all("SELECT * FROM events WHERE repo_id=? ORDER BY id DESC LIMIT 50", (repo_id,))
-    return render(request, "repo_detail.html", repo=repo, events=events)
+    verdict = version_verdict(repo)
+    return render(request, "repo_detail.html", repo=repo, events=events,
+                  verdict=verdict, fork_tone=fork_tone(verdict))
 
 
 def _repo_action(request, repo_id, csrf, action):

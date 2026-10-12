@@ -240,9 +240,101 @@ class WebTests(unittest.TestCase):
                     self.assertIn(tag, response.text)
                     self.assertIn(sha, response.text)
                     self.assertIn(date, response.text)
-                # The full 40-char SHA is no longer dumped on the detail page.
-                if path != "/repos":
-                    self.assertNotIn("a" * 40, response.text)
+                # The full 40-char SHA stays out of the rendered text; it is only
+                # offered in a tooltip so it can be pasted into GitHub.
+                self.assertFalse([element for element in page.elements
+                                  if "a" * 40 in element["text"]])
+
+    def test_repository_list_pairs_local_and_upstream_versions_with_a_verdict(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        same = insert_repository(self.main.db, owner="me", name="same",
+                                 full_name="me/same", upstream_full_name="up/same")
+        behind = insert_repository(self.main.db, owner="me", name="behind",
+                                   full_name="me/behind", upstream_full_name="up/behind",
+                                   status="behind")
+        self.main.db.run("UPDATE repositories SET fork_sha=?, upstream_sha=? WHERE id=?",
+                         ("c" * 40, "c" * 40, same))
+        self.main.db.run("UPDATE repositories SET fork_sha=?, upstream_sha=? WHERE id=?",
+                         ("d" * 40, "e" * 40, behind))
+        response, page = self.rendered_page("/repos")
+        # Each version line names its side so the two short SHAs can be matched.
+        sides = [element["text"].strip() for element in page.find("span", **{"class": "version-side"})]
+        self.assertEqual(sides.count("本地"), 2)
+        self.assertEqual(sides.count("上游"), 2)
+        # A shared commit reads as one commit; a differing pair names the upstream SHA.
+        self.assertIn("同一提交", response.text)
+        self.assertIn("c" * 12, response.text)
+        self.assertIn("落后上游", response.text)
+        self.assertIn("e" * 12, response.text)
+        # The verdict is rendered once per row and carries the full SHA in its tooltip.
+        verdicts = page.find("span", **{"class": "verdict v-same"})
+        self.assertEqual(len(verdicts), 1)
+        self.assertIn("c" * 40, verdicts[0]["attrs"].get("title", ""))
+
+    def test_partials_render_rows_without_the_shell(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        insert_repository(self.main.db, owner="me", name="demo",
+                          full_name="me/demo", upstream_full_name="up/demo")
+        for path, marker in (("/partials/repos", "<table"), ("/partials/overview", "受管仓库")):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(marker, response.text)
+                # A fragment never re-sends the shell, CSS or JS.
+                self.assertNotIn("<aside", response.text)
+                self.assertNotIn("app.css", response.text)
+        filtered = self.client.get("/partials/repos?filter=blocked")
+        self.assertEqual(filtered.status_code, 200)
+        self.assertIn("还没有受管仓库", filtered.text)
+
+    def test_full_page_stamps_the_revision_the_refresh_sends_back(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        insert_repository(self.main.db, owner="me", name="demo",
+                          full_name="me/demo", upstream_full_name="up/demo")
+        # The full page and the fragment must agree, otherwise every tick would
+        # re-fetch the whole row set even when nothing changed.
+        _, page = self.rendered_page("/repos")
+        stamped = [element["attrs"]["data-revision"] for element in page.elements
+                   if element["attrs"].get("data-revision")]
+        self.assertEqual(len(stamped), 1)
+        self.assertEqual(self.client.get(f"/partials/repos?v={stamped[0]}").status_code, 204)
+        _, overview = self.rendered_page("/")
+        overview_stamp = [element["attrs"]["data-revision"] for element in overview.elements
+                          if element["attrs"].get("data-revision")]
+        self.assertEqual(len(overview_stamp), 1)
+        self.assertEqual(self.client.get(f"/partials/overview?v={overview_stamp[0]}").status_code, 204)
+
+    def test_partials_require_a_session(self):
+        self.setup_admin()
+        self.client.cookies.clear()
+        for path in ("/partials/repos", "/partials/overview"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 401)
+
+    def test_unchanged_fragment_is_skipped_via_its_revision_token(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        insert_repository(self.main.db, owner="me", name="demo",
+                          full_name="me/demo", upstream_full_name="up/demo")
+        first = self.client.get("/partials/repos")
+        # The revision is stamped into the markup the browser will send back.
+        import re
+        match = re.search(r'data-revision="([^"]+)"', first.text)
+        self.assertTrue(match, first.text[:200])
+        revision = match.group(1)
+        again = self.client.get(f"/partials/repos?v={revision}")
+        self.assertEqual(again.status_code, 204)
+        self.assertEqual(again.content, b"")
+        # A changed row must invalidate the stored fragment.
+        self.main.db.run("UPDATE repositories SET status='blocked', last_error='boom'")
+        changed = self.client.get(f"/partials/repos?v={revision}")
+        self.assertEqual(changed.status_code, 200)
+        self.assertIn("boom", changed.text)
+        self.assertNotIn(f'data-revision="{revision}"', changed.text)
 
     def test_static_assets_use_content_hash_cache_buster(self):
         self.setup_admin()
