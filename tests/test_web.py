@@ -2,8 +2,10 @@
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +13,48 @@ from app import engine
 from app.github import RefNotFastForward
 
 TEST_PASSWORD = "correct-horse-8"
+
+
+class RenderedHTML(HTMLParser):
+    """Inspect rendered form ownership and labels without browser dependencies."""
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                 "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self, html):
+        super().__init__()
+        self.elements = []
+        self.stack = []
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        element = {"tag": tag, "attrs": dict(attrs), "parents": tuple(self.stack), "text": ""}
+        self.elements.append(element)
+        if tag not in self.VOID_TAGS:
+            self.stack.append(element)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]["tag"] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data):
+        for element in self.stack:
+            element["text"] += data
+
+    def find(self, tag, **attrs):
+        return [element for element in self.elements if element["tag"] == tag
+                and all(element["attrs"].get(key) == value for key, value in attrs.items())]
+
+    def inside(self, parent, tag, **attrs):
+        return [element for element in self.find(tag, **attrs)
+                if any(ancestor is parent for ancestor in element["parents"])]
+
+    def labels_for(self, field):
+        return [label for label in self.find("label") if label["text"].strip()
+                and (any(ancestor is label for ancestor in field["parents"])
+                     or (field["attrs"].get("id")
+                         and label["attrs"].get("for") == field["attrs"]["id"]))]
 
 
 class WebTests(unittest.TestCase):
@@ -47,6 +91,169 @@ class WebTests(unittest.TestCase):
 
     def csrf(self, token):
         return self.main.csrf_for(token)
+
+    def rendered_page(self, path):
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        return response, RenderedHTML(response.text)
+
+    def assert_post_form(self, page, action, token=None):
+        forms = page.find("form", action=action)
+        self.assertEqual(len(forms), 1, action)
+        form = forms[0]
+        self.assertEqual(form["attrs"].get("method", "get").lower(), "post", action)
+        if token is not None:
+            csrf_fields = page.inside(form, "input", name="csrf")
+            self.assertEqual(len(csrf_fields), 1, action)
+            self.assertEqual(csrf_fields[0]["attrs"].get("type"), "hidden")
+            self.assertEqual(csrf_fields[0]["attrs"].get("value"), self.csrf(token))
+        return form
+
+    def assert_page_accessibility(self, page):
+        self.assertEqual(len(page.find("main", id="main-content")), 1)
+        self.assertTrue(page.find("a", href="#main-content"))
+        self.assertTrue(any(urlsplit(script["attrs"].get("src", "")).path == "/static/app.js"
+                            for script in page.find("script")))
+
+    def test_login_renders_password_only_with_accessible_label(self):
+        self.client.post("/setup", data={"password": TEST_PASSWORD, "password2": TEST_PASSWORD})
+        response, page = self.rendered_page("/login")
+        self.assert_page_accessibility(page)
+        form = self.assert_post_form(page, "/login")
+        fields = page.inside(form, "input")
+        self.assertEqual([field["attrs"].get("name") for field in fields], ["password"])
+        password = fields[0]
+        self.assertEqual(password["attrs"].get("type"), "password")
+        self.assertEqual(password["attrs"].get("autocomplete"), "current-password")
+        self.assertFalse(password["attrs"].get("value"))
+        self.assertTrue(any("管理员密码" in label["text"] for label in page.labels_for(password)))
+        self.assertNotIn(TEST_PASSWORD, response.text)
+
+    def test_shell_pages_render_current_navigation_and_preserve_actions(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        routes = [("/", "/", ["/discover"]),
+                  ("/repos", "/repos", ["/repos/add"]),
+                  (f"/repos/{repo_id}", "/repos",
+                   [f"/repos/{repo_id}/{action}" for action in
+                    ("sync", "mode", "selfupdate", "pause", "actions", "remove")]),
+                  ("/settings", "/settings",
+                   ["/settings", "/settings/password", "/settings/disconnect"])]
+        for path, active_path, actions in routes:
+            with self.subTest(path=path):
+                _, page = self.rendered_page(path)
+                self.assert_page_accessibility(page)
+                current = [link for link in page.find("a", **{"aria-current": "page"})
+                           if any(parent["tag"] == "nav" for parent in link["parents"])]
+                self.assertEqual([link["attrs"].get("href") for link in current], [active_path])
+                self.assert_post_form(page, "/logout")
+                for action in actions:
+                    self.assert_post_form(page, action, token)
+
+    def test_repository_list_labels_url_and_wraps_table(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo",
+                                    status="blocked")
+        self.main.db.run("UPDATE repositories SET last_error=? WHERE id=?",
+                         ("GitHub denied <unsafe>", repo_id))
+        response, page = self.rendered_page("/repos?filter=blocked")
+        form = self.assert_post_form(page, "/repos/add")
+        fields = page.inside(form, "input", name="url")
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]["attrs"].get("type"), "url")
+        self.assertTrue(page.labels_for(fields[0]))
+        self.assertTrue(page.find("a", href=f"/repos/{repo_id}"))
+        tables = page.find("table")
+        self.assertTrue(tables)
+        for table in tables:
+            self.assertTrue(any("table-wrap" in parent["attrs"].get("class", "").split()
+                                for parent in table["parents"]))
+        self.assertIn("GitHub denied &lt;unsafe&gt;", response.text)
+        self.assertNotIn("<unsafe>", response.text)
+
+    def test_repository_detail_preserves_paused_actions_and_hidden_enabled(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo",
+                                    status="paused")
+        self.main.db.run("UPDATE repositories SET enabled=0, actions_disabled=1, "
+                         "mode='manual', self_update_interval=1 WHERE id=?", (repo_id,))
+        _, page = self.rendered_page(f"/repos/{repo_id}")
+        self.assert_post_form(page, f"/repos/{repo_id}/resume", token)
+        self.assertFalse(page.find("form", action=f"/repos/{repo_id}/pause"))
+        actions_form = self.assert_post_form(page, f"/repos/{repo_id}/actions", token)
+        self.assertEqual(page.inside(actions_form, "input", name="enabled")[0]["attrs"]["value"], "1")
+        self_update_form = self.assert_post_form(page, f"/repos/{repo_id}/selfupdate", token)
+        self.assertIn("关闭自更新", self_update_form["text"])
+        remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
+        self.assertTrue(remove_form["attrs"].get("data-confirm"))
+
+    def test_settings_fields_keep_labels_values_and_notices(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("check_interval", "90")
+        self.main.db.set_setting("auto_discover", "0")
+        self.main.db.set_setting("auth_error", "GitHub credentials expired")
+        response, page = self.rendered_page("/settings?notice=Saved")
+        self.assertIn("Saved", response.text)
+        self.assertIn("GitHub credentials expired", response.text)
+        form = self.assert_post_form(page, "/settings", token)
+        interval = page.inside(form, "input", name="interval")[0]
+        self.assertEqual(interval["attrs"].get("value"), "90")
+        auto_discover = page.inside(form, "input", name="auto_discover")[0]
+        self.assertNotIn("checked", auto_discover["attrs"])
+        password_form = self.assert_post_form(page, "/settings/password", token)
+        fields = [interval, auto_discover] + page.inside(password_form, "input", type="password")
+        self.assertEqual(len(fields), 5)
+        for field in fields:
+            self.assertTrue(page.labels_for(field), field["attrs"].get("name"))
+        self.assertNotIn(TEST_PASSWORD, response.text)
+
+    def test_connection_and_installation_keep_manifest_and_detect_forms(self):
+        token = self.setup_admin()
+        _, page = self.rendered_page("/github/connect")
+        self.assert_page_accessibility(page)
+        manifest_forms = page.find("form", id="manifest-form")
+        self.assertEqual(len(manifest_forms), 1)
+        form = manifest_forms[0]
+        state = self.main.db.get_setting("github_manifest_state")
+        self.assertEqual(form["attrs"]["action"], f"{self.main.MANIFEST_URL}?state={state}")
+        self.assertEqual(form["attrs"].get("method"), "post")
+        import json
+        payload = json.loads(page.inside(form, "input", name="manifest")[0]["attrs"]["value"])
+        self.assertEqual(payload["redirect_url"], "https://fork.llkan.com/api/github/callback")
+        self.assertEqual(payload["default_permissions"]["workflows"], "write")
+        app_payload = {"id": 123, "slug": "forkiq-test", "pem": "test-pem"}
+        with mock.patch.object(self.main, "exchange_manifest", return_value=app_payload), \
+             mock.patch.object(self.main, "write_pem"):
+            response = self.client.get(f"/api/github/callback?code=test-code&state={state}")
+        self.assertEqual(response.status_code, 200)
+        installation_page = RenderedHTML(response.text)
+        self.assert_page_accessibility(installation_page)
+        self.assertTrue(installation_page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+        self.assert_post_form(installation_page, "/github/detect", token)
+        _, connected = self.rendered_page("/github/connect")
+        self.assertTrue(connected.find("a", href="/"))
+
+    def test_empty_and_error_pages_remain_actionable(self):
+        self.setup_admin()
+        self.main.db.run("DELETE FROM events")
+        response, _ = self.rendered_page("/")
+        self.assertIn("还没有事件", response.text)
+        self.assertIn('/github/connect', response.text)
+        response, page = self.rendered_page("/repos")
+        self.assertIn("还没有受管仓库", response.text)
+        self.assert_post_form(page, "/repos/add")
+        response, page = self.rendered_page("/repos/99999")
+        self.assertIn("未找到", response.text)
+        self.assertIn("仓库不在管理列表中", response.text)
+        self.assert_page_accessibility(page)
+        self.assertTrue(page.find("a", href="/"))
 
     def test_setup_requires_matching_passwords_and_min_length(self):
         response = self.client.post("/setup", data={"password": "short", "password2": "short"})

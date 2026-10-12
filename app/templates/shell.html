@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "components.html" import icon %}
+{% block bodyclass %}panel-page{% endblock %}
+{% block body %}
+<div class="shell">
+  <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <a class="brand" href="/">{{ icon('git-fork') }}<span>ForkIQ</span></a>
+    <nav aria-label="面板导航">
+      <a href="/" {% if active_page == 'overview' %}class="active" aria-current="page"{% endif %}>{{ icon('layout-dashboard') }}<span>概览</span></a>
+      <a href="/repos" {% if active_page == 'repos' %}class="active" aria-current="page"{% endif %}>{{ icon('folder-git-2') }}<span>仓库管理</span></a>
+      <a href="/settings" {% if active_page == 'settings' %}class="active" aria-current="page"{% endif %}>{{ icon('settings-2') }}<span>系统设置</span></a>
+    </nav>
+    <div class="sidebar-note">跟进上游，保留历史。<br>同步过程始终可追溯。</div>
+    <div class="sidebar-bottom">
+      <button class="icon-button theme-toggle" type="button" aria-label="切换为深色主题" title="切换主题">{{ icon('moon', 'theme-moon') }}{{ icon('sun', 'theme-sun') }}</button>
+      <form method="post" action="/logout" class="logout"><button class="logout-button" type="submit">{{ icon('log-out') }}退出登录</button></form>
+    </div>
+  </aside>
+  <button type="button" class="sidebar-overlay" aria-label="关闭导航" tabindex="-1" hidden></button>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="topbar-title">
+        <button class="icon-button menu-toggle" type="button" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false">{{ icon('menu') }}</button>
+        {{ icon(page_icon|default('layout-dashboard'), 'heading-icon') }}
+        <h1>{% block page_title %}ForkIQ{% endblock %}</h1>
+      </div>
+      <div class="topbar-actions">{% block header_actions %}{% endblock %}</div>
+    </header>
+    <main class="content" id="main-content" tabindex="-1" {% if auto_refresh %}data-auto-refresh="30"{% endif %}>{% block content %}{% endblock %}</main>
+  </div>
+</div>
+{% endblock %}

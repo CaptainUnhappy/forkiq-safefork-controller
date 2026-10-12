@@ -1,31 +1,22 @@
-{% extends "base.html" %}
+{% extends "auth.html" %}
 {% block title %}ForkIQ · 连接 GitHub{% endblock %}
-{% block bodyclass %}split{% endblock %}
-{% block body %}
-<div class="split-left">
-  <div class="brand">ForkIQ</div>
-  <h1 class="hero">连接 GitHub App，开始自动同步。</h1>
-  <ol class="feature-list numbered">
-    <li>点击右侧按钮，在 GitHub 上创建专用 App（已预填权限）</li>
-    <li>创建后按提示安装到你的账号，选择 All repositories</li>
-    <li>回到本页点击「我已安装，检测」完成连接</li>
+{% block auth_title %}连接 GitHub App{% endblock %}
+{% block auth_description %}<p class="auth-description">通过专用 App 授权，无需提供 GitHub 账号密码。</p>{% endblock %}
+{% block auth_content %}
+{% if app_slug %}
+  <div class="notice"><strong>已连接：{{ app_slug }}</strong>{% if installation_id %}<br>installation {{ installation_id }}{% endif %}</div>
+  <a class="primary link auth-submit" href="/">进入面板{{ icon('arrow-right') }}</a>
+{% else %}
+  <ol class="connect-steps">
+    <li>在 GitHub 创建专用 App，权限已预填。</li>
+    <li>安装到你的账号，选择 All repositories。</li>
+    <li>返回面板，检测安装并开始同步。</li>
   </ol>
-  <div class="footnote">权限仅包含 Contents（更新分支）、Administration（可选的 Actions 开关）与 Metadata。</div>
-</div>
-<div class="split-right">
-  <div class="card auth-card">
-    <span class="chip">步骤 1</span>
-    <h2>创建 GitHub App</h2>
-    {% if app_slug %}
-      <p class="ok">已连接：{{ app_slug }}{% if installation_id %} · installation {{ installation_id }}{% endif %}</p>
-      <a class="primary link" href="/">进入面板</a>
-    {% else %}
-      <form method="post" action="{{ manifest_url }}?state={{ state }}" id="manifest-form">
-        <input type="hidden" name="manifest" value='{{ manifest }}'>
-        <button class="primary" type="submit">在 GitHub 上创建 App</button>
-      </form>
-      <p class="muted">创建完成后，GitHub 会带着授权码跳回本页面。</p>
-    {% endif %}
-  </div>
-</div>
+  <form method="post" action="{{ manifest_url }}?state={{ state }}" id="manifest-form">
+    <input type="hidden" name="manifest" value='{{ manifest }}'>
+    <button class="primary auth-submit" type="submit">在 GitHub 上创建 App{{ icon('arrow-right') }}</button>
+  </form>
+  <p class="auth-footnote">创建后 GitHub 会自动跳回面板。授权包含 Contents、Workflows、Actions、Administration 与 Metadata。</p>
+{% endif %}
+<a class="auth-back" href="/">返回概览</a>
 {% endblock %}

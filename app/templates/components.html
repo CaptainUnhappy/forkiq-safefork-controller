@@ -1,0 +1,13 @@
+{% macro icon(name, class_name='') -%}
+<svg class="icon {{ class_name }}" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>
+{%- endmacro %}
+
+{% macro status(value) -%}
+{% set labels = {'synced': '已同步', 'behind': '待同步', 'pending': '等待检查', 'diverged': '存在分叉', 'blocked': '同步阻塞', 'error': '检查失败', 'needs_attention': '需要处理', 'paused': '已暂停', 'missing': '仓库缺失'} %}
+<span class="badge s-{{ value }}" title="{{ value }}">{{ labels.get(value, value) }}</span>
+{%- endmacro %}
+
+{% macro event_kind(value) -%}
+{% set labels = {'synced': '同步完成', 'discover': '发现仓库', 'blocked': '同步阻塞', 'error': '错误', 'auth': '认证', 'check': '检查', 'merge': '合并', 'selfupdate': '自更新'} %}
+<span class="badge kind-{{ value }}" title="{{ value }}">{{ labels.get(value, value) }}</span>
+{%- endmacro %}

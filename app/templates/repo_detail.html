@@ -1,21 +1,12 @@
-{% extends "base.html" %}
-{% block title %}ForkIQ · {{ repo.full_name }}{% endblock %}
-{% block body %}
-<div class="shell">
-  <aside class="sidebar">
-    <div class="brand small">ForkIQ</div>
-    <nav>
-      <a href="/">概览</a>
-      <a class="active" href="/repos">仓库</a>
-      <a href="/settings">设置</a>
-    </nav>
-    <form method="post" action="/logout" class="logout"><button class="ghost">退出登录</button></form>
-  </aside>
-  <main class="content">
-    <header class="page-head">
-      <h1>{{ repo.full_name }}</h1>
-      <span class="badge s-{{ repo.status }}">{{ repo.status }}</span>
-    </header>
+{% extends "shell.html" %}
+{% from "components.html" import icon, status, event_kind %}
+{% set active_page = "repos" %}
+{% set page_icon = "folder-git-2" %}
+{% block title %}ForkIQ · 仓库{% endblock %}
+{% block page_title %}{{ repo.full_name }}{% endblock %}
+{% block header_actions %}{{ status(repo.status) }}{% endblock %}
+{% block content %}
+    <a class="back-link" href="/repos">{{ icon("chevron-right") }}返回仓库列表</a>
     <section class="card">
       <dl class="kv">
         <dt>上游</dt><dd>{{ repo.upstream_full_name or '—' }}</dd>
@@ -65,19 +56,12 @@
     <section class="card">
       <h2>事件历史</h2>
       {% if events %}
-      <table class="events">
+      <div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events" data-columns="3">
         <tr><th>时间</th><th>类型</th><th>说明</th></tr>
         {% for e in events %}
-        <tr><td class="muted">{{ e.at }}</td><td><span class="badge kind-{{ e.kind }}">{{ e.kind }}</span></td><td>{{ e.message }}</td></tr>
+        <tr><td class="muted">{{ e.at }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ e.message }}</td></tr>
         {% endfor %}
-      </table>
+      </table></div>
       {% else %}<p class="muted">暂无事件。</p>{% endif %}
     </section>
-  </main>
-</div>
-<script>
-document.querySelectorAll('form.confirm').forEach(f => f.addEventListener('submit', e => {
-  if (!confirm(f.dataset.confirm)) e.preventDefault();
-}));
-</script>
 {% endblock %}

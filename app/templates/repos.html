@@ -1,53 +1,44 @@
-{% extends "base.html" %}
+{% extends "shell.html" %}
+{% from "components.html" import icon, status, event_kind %}
+{% set active_page = "repos" %}
+{% set page_icon = "folder-git-2" %}
+{% set auto_refresh = true %}
 {% block title %}ForkIQ · 仓库{% endblock %}
-{% block body %}
-<div class="shell">
-  <aside class="sidebar">
-    <div class="brand small">ForkIQ</div>
-    <nav>
-      <a href="/">概览</a>
-      <a class="active" href="/repos">仓库</a>
-      <a href="/settings">设置</a>
-    </nav>
-    <form method="post" action="/logout" class="logout"><button class="ghost">退出登录</button></form>
-  </aside>
-  <main class="content">
-    <header class="page-head">
-      <h1>仓库</h1>
-      <div class="filters">
+{% block page_title %}仓库管理{% endblock %}
+{% block header_actions %}{% endblock %}
+{% block content %}
+    <div class="page-intro"><p class="muted">集中查看 fork 状态，管理上游同步。</p></div>
+    <div class="filters">
         <a class="chip-link {% if not filter %}active{% endif %}" href="/repos">全部</a>
         <a class="chip-link {% if filter == 'synced' %}active{% endif %}" href="/repos?filter=synced">已同步</a>
         <a class="chip-link {% if filter == 'diverged' %}active{% endif %}" href="/repos?filter=diverged">分叉</a>
         <a class="chip-link {% if filter == 'blocked' %}active{% endif %}" href="/repos?filter=blocked">阻塞</a>
         <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">暂停</a>
       </div>
-    </header>
     <section class="card">
       <h2>添加 fork</h2>
       {% if add_error %}<div class="error">{{ add_error }}</div>{% endif %}
       <form method="post" action="/repos/add" class="inline">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="url" name="url" placeholder="https://github.com/你/fork 名称" required>
+        <label class="sr-only" for="fork-url">GitHub fork 仓库链接</label>
+        <input id="fork-url" type="url" name="url" placeholder="https://github.com/owner/repository" required>
         <button class="primary">加入自动同步</button>
       </form>
     </section>
     <section class="card">
       {% if repos %}
-      <table class="repos">
+      <div class="table-wrap" role="region" aria-label="仓库列表" tabindex="0"><table class="repos">
         <tr><th>仓库</th><th>上游</th><th>状态</th><th>最近检查</th></tr>
         {% for r in repos %}
         <tr>
           <td><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{% if r.mode == 'manual' %}<span class="tag">手工</span>{% endif %}{% if r.self_update_interval %}<span class="tag">自更新</span>{% endif %}{% if r.discovered %}<span class="tag">自动发现</span>{% endif %}</td>
-          <td class="muted">{{ r.upstream_full_name or '—' }}</td>
-          <td><span class="badge s-{{ r.status }}">{{ r.status }}</span>
+          <td class="muted" data-label="上游">{{ r.upstream_full_name or '—' }}</td>
+          <td>{{ status(r.status) }}
               {% if r.last_error %}<div class="err-hint">{{ r.last_error }}</div>{% endif %}</td>
-          <td class="muted">{{ r.last_check_at or '—' }}</td>
+          <td class="muted" data-label="最近检查">{{ r.last_check_at or '—' }}</td>
         </tr>
         {% endfor %}
-      </table>
+      </table></div>
       {% else %}<p class="muted">还没有受管仓库。粘贴一个 fork 链接，或在设置里开启自动发现。</p>{% endif %}
     </section>
-  </main>
-</div>
-<script>setTimeout(() => location.reload(), 30000);</script>
 {% endblock %}

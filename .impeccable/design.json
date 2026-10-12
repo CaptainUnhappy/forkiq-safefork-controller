@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-12T00:55:54.961402Z",
+  "title": "Design System: ForkIQ",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "card-light",
+        "value": "0 3px 16px rgba(32, 48, 39, .06)",
+        "purpose": "浅色主题的统一卡片阴影。"
+      },
+      {
+        "name": "card-dark",
+        "value": "0 3px 16px rgba(0, 0, 0, .16)",
+        "purpose": "深色主题的统一卡片阴影。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "control-transition",
+        "value": "background .18s, border-color .18s",
+        "purpose": "按钮颜色及边框过渡；输入框使用相同持续时间。"
+      },
+      {
+        "name": "mobile-sidebar-transition",
+        "value": "transform .2s ease-out",
+        "purpose": "手机导航抽屉；减少动效设置下禁用。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile-max",
+        "value": "760px"
+      },
+      {
+        "name": "compact-max",
+        "value": "1000px"
+      },
+      {
+        "name": "wide-min",
+        "value": "1500px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "主按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主要操作。",
+      "html": "<button class=\"ds-button-primary\" type=\"button\">同步</button>",
+      "css": ".ds-button-primary{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:7px 13px;border:1px solid transparent;border-radius:6px;cursor:pointer;font:500 13px/1.5 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;transition:background .18s,border-color .18s;color:#fff;background:var(--primary,#078747);}.ds-button-primary:hover{background:var(--primary-hover,#056e39);}.ds-button-primary:focus-visible{outline:2px solid var(--primary,#078747);outline-offset:3px}.ds-button-primary:disabled{opacity:.55;cursor:wait}:host-context([data-theme=\"dark\"]) .ds-button-primary{color:#132b1b}@media(prefers-reduced-motion:reduce){.ds-button-primary{transition:none}}"
+    },
+    {
+      "name": "次按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "辅助操作。",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\">查看详情</button>",
+      "css": ".ds-button-secondary{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:7px 13px;border:1px solid transparent;border-radius:6px;cursor:pointer;font:500 13px/1.5 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;transition:background .18s,border-color .18s;color:var(--ink,#303732);background:var(--card,#fff);border-color:var(--line,#e3e8e4);}.ds-button-secondary:hover{color:var(--primary,#078747);background:var(--primary-soft,#e8f6ed);border-color:var(--primary,#078747);}.ds-button-secondary:focus-visible{outline:2px solid var(--primary,#078747);outline-offset:3px}.ds-button-secondary:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-button-secondary{transition:none}}"
+    },
+    {
+      "name": "危险按钮",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "需谨慎处理的操作。",
+      "html": "<button class=\"ds-button-danger\" type=\"button\">暂停同步</button>",
+      "css": ".ds-button-danger{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:7px 13px;border:1px solid transparent;border-radius:6px;cursor:pointer;font:500 13px/1.5 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;transition:background .18s,border-color .18s;color:var(--red,#c53b3b);background:var(--card,#fff);border-color:var(--line,#e3e8e4);}.ds-button-danger:hover{background:var(--danger-soft,#fff0ef);border-color:var(--red,#c53b3b);}.ds-button-danger:focus-visible{outline:2px solid var(--primary,#078747);outline-offset:3px}.ds-button-danger:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-button-danger{transition:none}}"
+    },
+    {
+      "name": "文本字段",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "带有可见标签的原生输入框。",
+      "html": "<label class=\"ds-field\" for=\"ds-repository-url\">仓库地址</label><input class=\"ds-input\" id=\"ds-repository-url\" type=\"url\" placeholder=\"请输入仓库地址\">",
+      "css": ".ds-field{display:block;color:var(--ink,#303732);font:500 13px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;margin-bottom:7px}.ds-input{width:100%;min-height:42px;padding:9px 12px;color:var(--ink,#303732);background:var(--surface,#f8faf8);border:1px solid var(--line,#e3e8e4);border-radius:6px;caret-color:var(--primary,#078747);font:14px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;transition:border-color .18s,background .18s}.ds-input::placeholder{color:var(--muted,#66726a);opacity:1}.ds-input:focus{background:var(--card,#fff);border-color:var(--primary,#078747);outline:2px solid var(--primary-soft,#e8f6ed);outline-offset:1px}@media(prefers-reduced-motion:reduce){.ds-input{transition:none}}"
+    },
+    {
+      "name": "导航当前项",
+      "kind": "nav",
+      "refersTo": "navigation-active",
+      "description": "带当前页语义的侧栏导航。",
+      "html": "<nav class=\"ds-nav\" aria-label=\"面板导航\"><a class=\"ds-nav-current\" href=\"/\" aria-current=\"page\">概览</a><a href=\"/repos\">仓库管理</a><a href=\"/settings\">系统设置</a></nav>",
+      "css": ".ds-nav{display:grid;gap:5px;padding:22px 10px;background:var(--card,#fff);font:14px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif}.ds-nav a{display:flex;align-items:center;gap:11px;min-height:44px;padding:10px 16px;color:var(--muted,#66726a);border-radius:6px;text-decoration:none}.ds-nav a.ds-nav-current,.ds-nav a:hover{color:var(--primary,#078747);background:var(--primary-soft,#e8f6ed)}.ds-nav a.ds-nav-current{font-weight:600}.ds-nav a:focus-visible{outline:2px solid var(--primary,#078747);outline-offset:3px}"
+    },
+    {
+      "name": "同步状态标签",
+      "kind": "chip",
+      "refersTo": "badge-synced",
+      "description": "以文字和绿色组同时表达同步完成。",
+      "html": "<span class=\"ds-badge\" title=\"synced\">已同步</span>",
+      "css": ".ds-badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:5px;white-space:nowrap;background:var(--primary-soft,#e8f6ed);color:var(--green,#078747);font:500 11px/1.5 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif}"
+    },
+    {
+      "name": "内容卡片",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "承载工作区内容的轻阴影容器。",
+      "html": "<section class=\"ds-card\"><h2>仓库状态</h2><p>查看同步状态与事件。</p></section>",
+      "css": ".ds-card{background:var(--card,#fff);color:var(--ink,#303732);border-radius:var(--radius,10px);padding:24px;box-shadow:var(--shadow,0 3px 16px rgba(32,48,39,.06));font:14px/1.65 \"Avenir Next\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif}.ds-card h2{margin:0 0 16px;font-size:16px;line-height:1.5;font-weight:600}.ds-card p{margin:0}@media(max-width:760px){.ds-card{padding:20px 16px}}"
+    }
+  ]
+}

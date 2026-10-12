@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% from "components.html" import icon %}
+{% block bodyclass %}auth-page{% endblock %}
+{% block body %}
+<main class="auth-layout" id="main-content" tabindex="-1">
+  <div class="auth-card card auth-wide">
+    <a class="auth-brand" href="/">{{ icon('git-fork') }}<span>ForkIQ</span></a>
+    <h1>{% block auth_title %}ForkIQ{% endblock %}</h1>
+    {% block auth_description %}{% endblock %}
+    {% block auth_content %}{% endblock %}
+  </div>
+  <p class="auth-caption">ForkIQ · GitHub fork 同步管理</p>
+</main>
+{% endblock %}

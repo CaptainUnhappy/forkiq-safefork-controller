@@ -1,24 +1,12 @@
-{% extends "base.html" %}
+{% extends "auth.html" %}
 {% block title %}ForkIQ · 安装 App{% endblock %}
-{% block bodyclass %}split{% endblock %}
-{% block body %}
-<div class="split-left">
-  <div class="brand">ForkIQ</div>
-  <h1 class="hero">最后一步：把 App 安装到你的账号。</h1>
-  <ul class="feature-list">
-    <li>仓库范围请选择 All repositories，未来新 fork 才能自动发现</li>
-    <li>安装后回到这里点击检测即可完成</li>
-  </ul>
-</div>
-<div class="split-right">
-  <div class="card auth-card">
-    <span class="chip">步骤 2</span>
-    <h2>安装到 GitHub 账号</h2>
-    <a class="primary link" href="{{ install_url }}" target="_blank" rel="noopener">打开 GitHub 安装页</a>
-    <form method="post" action="/github/detect">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="primary" type="submit">我已安装，检测</button>
-    </form>
-  </div>
-</div>
+{% block auth_title %}安装到 GitHub 账号{% endblock %}
+{% block auth_description %}<p class="auth-description">完成安装后，ForkIQ 就能检查上游并同步仓库。</p>{% endblock %}
+{% block auth_content %}
+  <ol class="connect-steps"><li>打开安装页，选择 All repositories，后续新 fork 才能自动发现。</li><li>安装完成后返回，点击检测。</li></ol>
+  <a class="secondary link auth-submit" href="{{ install_url }}" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
+  <form method="post" action="/github/detect" class="stacked-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary auth-submit" type="submit">我已安装，检测{{ icon('refresh-cw') }}</button>
+  </form>
 {% endblock %}
