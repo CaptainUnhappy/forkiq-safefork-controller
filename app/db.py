@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS repositories(
   diverged_at TEXT,
   diverged_upstream_sha TEXT,
   last_merged_upstream_sha TEXT,
+  upstream_ahead INTEGER,
+  fork_ahead INTEGER,
   self_update TEXT,
   self_update_interval INTEGER,
   actions_disabled INTEGER,
@@ -110,6 +112,10 @@ class DB:
             conn.execute("ALTER TABLE repositories ADD COLUMN fork_commit_at TEXT")
         if "upstream_gone" not in columns:
             conn.execute("ALTER TABLE repositories ADD COLUMN upstream_gone INTEGER NOT NULL DEFAULT 0")
+        if "upstream_ahead" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN upstream_ahead INTEGER")
+        if "fork_ahead" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN fork_ahead INTEGER")
         conn.commit()
 
     def run(self, sql, params=()):

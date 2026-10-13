@@ -152,12 +152,15 @@ tr:hover td { background: var(--surface); }
 .version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
 .version-chip .tag-version.tag-missing { color: var(--muted); font-weight: 400; }
 .version-chip .version-date { font-size: 11px; }
-/* One comparison label per row: the two short SHAs above are matched by this. */
-.verdict { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 8px; margin-bottom: 4px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+/* One comparison label per row: the two short SHAs above are matched by this.
+   The label names the reason the two heads differ, so it wraps as a whole
+   between the text and the SHA instead of overflowing the column. */
+.verdict { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 2px 6px; padding: 2px 8px; margin-bottom: 4px; border-radius: 5px; font-size: 11px; font-weight: 500; }
+.verdict > span { white-space: nowrap; }
 .verdict .verdict-sha { font-size: 11px; font-variant-numeric: tabular-nums; }
 .v-same, .v-contains { background: var(--primary-soft); color: var(--green); }
 .v-behind { background: var(--warning-soft); color: var(--amber); }
-.v-unsynced, .v-gone { background: var(--danger-soft); color: var(--red); }
+.v-unsynced, .v-gone, .v-diverged { background: var(--danger-soft); color: var(--red); }
 .v-pending { background: var(--surface); color: var(--muted); }
 .repos td:nth-child(2) .verdict { display: flex; width: fit-content; }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }

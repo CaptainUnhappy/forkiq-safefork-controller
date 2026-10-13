@@ -203,6 +203,23 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.status(), "diverged")
         self.assertEqual(self.row()["diverged_upstream_sha"], "b" * 40)
         self.assertIn("3 个独有提交", self.row()["last_error"])
+        # The counts are kept next to the SHAs: the list explains "not the same
+        # version" with them instead of probing on every page load.
+        self.assertEqual(self.row()["fork_ahead"], 3)
+        self.assertEqual(self.row()["upstream_ahead"], 5)
+
+    def test_same_commit_records_zero_counts(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.row()["upstream_ahead"], 0)
+        self.assertEqual(self.row()["fork_ahead"], 0)
+
+    def test_fast_forward_records_zero_counts(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.refs["me/demo"] = "a" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.row()["upstream_ahead"], 0)
+        self.assertEqual(self.row()["fork_ahead"], 0)
 
     def test_diverged_is_sticky_until_upstream_advances(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
@@ -534,6 +551,58 @@ class ManualModeTests(unittest.TestCase):
         self.assertEqual(self.status(), "synced")
         self.assertFalse(any(c[0] == "merge_upstream" for c in self.client.calls))
         self.assertEqual(self.row()["last_merged_upstream_sha"], "b" * 40)
+        # The fork's own commits are counted so the list can say why the two
+        # version lines differ while nothing needs syncing.
+        self.assertEqual(self.row()["upstream_ahead"], 0)
+        self.assertEqual(self.row()["fork_ahead"], 2)
+
+    def test_merge_records_counts_including_the_merge_commit(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
+        self.client.merge_result = {"merge_type": "merge", "message": "merged"}
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        row = self.row()
+        # Upstream is inside the fork now, and the merge commit itself is one
+        # more commit the fork has and upstream does not.
+        self.assertEqual(row["upstream_ahead"], 0)
+        self.assertEqual(row["fork_ahead"], 4)
+
+    def test_fast_forward_merge_leaves_no_own_commits(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.compare_result = {"ahead_by": 5, "behind_by": 0}
+        self.client.merge_result = {"merge_type": "fast-forward", "message": "ok"}
+        engine.run_cycle(self.db, self.client)
+        row = self.row()
+        self.assertEqual(row["upstream_ahead"], 0)
+        self.assertEqual(row["fork_ahead"], 0)
+
+    def test_stable_fork_backfills_counts_once(self):
+        """加列之前就已稳定的 fork：一次 compare 补上计数，之后不再探测。"""
+        self.db.run("UPDATE repositories SET status='synced', fork_sha=?, upstream_sha=?, "
+                    "last_merged_upstream_sha=? WHERE id=?",
+                    ("c" * 40, "b" * 40, "b" * 40, self.repo_id))
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
+        self.client.compare_result = {"ahead_by": 0, "behind_by": 15}
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.row()["fork_ahead"], 15)
+        self.assertEqual(self.status(), "synced")
+        probes = sum(1 for c in self.client.calls if c[0] == "compare")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "compare"), probes)
+
+    def test_failed_count_probe_is_not_retried_every_cycle(self):
+        self.db.run("UPDATE repositories SET status='synced', fork_sha=?, upstream_sha=?, "
+                    "last_merged_upstream_sha=? WHERE id=?",
+                    ("c" * 40, "b" * 40, "b" * 40, self.repo_id))
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
+        self.client.compare_error = True
+        engine.run_cycle(self.db, self.client)
+        self.assertIsNone(self.row()["fork_ahead"])
+        probes = sum(1 for c in self.client.calls if c[0] == "compare")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "compare"), probes)
+        self.assertEqual(self.status(), "synced")
 
     def test_same_sha_is_quiet(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)

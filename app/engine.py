@@ -13,6 +13,9 @@ from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConfli
 
 BATCH = 50
 ERROR_RETRY_SECONDS = 600
+# A repo whose comparison counts are unknown is probed at most this often, so a
+# probe that keeps failing cannot turn into one extra API call per cycle.
+COUNTS_PROBE_SECONDS = 6 * 3600
 NODES_QUERY = """
 query($ids: [ID!]!) {
   nodes(ids: $ids) {
@@ -107,6 +110,54 @@ def _version_fields(node, parent):
         "fork_commit_at": fork_target.get("committedDate"),
         "upstream_commit_at": parent_target.get("committedDate"),
     }
+
+
+def _count_fields(payload):
+    """Commit counts behind the list's comparison label.
+
+    Kept next to the two SHAs so the panel can name *why* they differ without a
+    probe on every page load. compare(base=fork, head=upstream) reports both
+    counts from the upstream branch's point of view: ahead_by is how many
+    upstream commits the fork lacks (the local side is behind by that many),
+    behind_by is how many commits are unique to the fork (it is ahead by that
+    many). An unprobeable comparison returns no counts, leaving whatever was
+    stored before in place rather than claiming zero.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    return {"upstream_ahead": int(payload.get("ahead_by") or 0),
+            "fork_ahead": int(payload.get("behind_by") or 0)}
+
+
+def _counts_probe_due(db, repo_id):
+    """Whether a repo with unknown counts may be probed again."""
+    stamp = db.get_setting(f"counts_probe:{repo_id}")
+    if not stamp:
+        return True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(stamp)
+    except ValueError:
+        return True
+    return age.total_seconds() >= COUNTS_PROBE_SECONDS
+
+
+def _counts_missing(row):
+    """True while a row has never had a comparison count recorded."""
+    return row["upstream_ahead"] is None or row["fork_ahead"] is None
+
+
+def _probe_counts(db, client, row, fork_branch):
+    """One compare probe that fills counts for a repo whose SHAs never move."""
+    repo_id = row["id"]
+    db.set_setting(f"counts_probe:{repo_id}", utcnow())
+    head = f"{row['upstream_full_name'].split('/')[0]}:{fork_branch}"
+    try:
+        payload = client.compare(row["full_name"], fork_branch, head)
+    except (RateLimited, AuthError):
+        raise
+    except Exception:
+        return {}
+    return _count_fields(payload)
 
 
 def _parents_by_node(client, node_ids):
@@ -456,6 +507,9 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
     """
     repo_id = row["id"]
     version = version or {}
+    if fork_sha == upstream_sha:
+        # Same commit: both sides agree, so both counts are zero.
+        version = {**version, "upstream_ahead": 0, "fork_ahead": 0}
     if not forced:
         if fork_sha == upstream_sha:
             if row["status"] != "synced":
@@ -468,6 +522,10 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
         if (row["status"] == "synced" and fork_sha == row["fork_sha"]
                 and upstream_sha == row["last_merged_upstream_sha"]):
             # Neither side moved since the last observation: nothing to do.
+            if _counts_missing(row) and _counts_probe_due(db, repo_id):
+                # Stable since before the counts were recorded: one probe fills
+                # them in for the list's comparison label.
+                version = {**version, **_probe_counts(db, client, row, fork_branch)}
             _set_repo(db, repo_id, last_check_at=now, **version)
             return "synced"
     if row["status"] == "needs_attention" and not forced and not _merge_retry_due(row):
@@ -484,6 +542,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
         raise
     except Exception:
         payload = "probe-failed"
+    counts = _count_fields(payload)
+    version = {**version, **counts}
     if isinstance(payload, dict) and payload.get("ahead_by", 0) == 0:
         # Fork already contains the upstream head (its own commits sit on top,
         # or a merge raced ahead of us); record the marker without another merge.
@@ -504,6 +564,11 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
             label = "快进"
         else:
             label = "合并"
+        if counts:
+            # Upstream is inside the fork now; a real merge also adds the merge
+            # commit itself to the fork's unique commits.
+            version = {**version, "upstream_ahead": 0,
+                       "fork_ahead": counts["fork_ahead"] + (1 if merge_type == "merge" else 0)}
         _set_repo(db, repo_id, status="synced", fork_sha=confirmed, upstream_sha=upstream_sha,
                   last_merged_upstream_sha=upstream_sha, last_check_at=utcnow(),
                   last_success_at=utcnow(), last_error=None, **version)
@@ -557,6 +622,7 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
                                  f"{row['upstream_full_name'].split('/')[0]}:{row['branch']}")
     except Exception:
         payload = "probe-failed"
+    version = {**(version or {}), **_count_fields(payload)}
     if payload is None:
         _mark_diverged(db, row, upstream_sha, "与上游无共同祖先（历史被重写），不会覆盖", version)
         return "diverged"
@@ -572,13 +638,13 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
             if row["status"] != "error" or row["last_error"] != message:
                 log_event(db, row["id"], "error", f"{row['full_name']} 同步失败：{message}")
             _set_repo(db, row["id"], status="error", last_check_at=utcnow(),
-                      last_error=message, **(version or {}))
+                      last_error=message, **version)
             return "error"
     message = f"推送被 GitHub 拒绝（403）：{str(error)[:200]}"
     if row["status"] != "error" or row["last_error"] != message:
         log_event(db, row["id"], "error", f"{row['full_name']} 同步失败：{message}")
     _set_repo(db, row["id"], status="error", last_check_at=utcnow(), last_error=message,
-              **(version or {}))
+              **version)
     return "error"
 
 
@@ -598,13 +664,14 @@ def _classify_non_ff(db, client, row, upstream_sha, version=None):
         log_event(db, row["id"], "blocked",
                   f"{row['full_name']} 与上游无共同祖先，已停止自动同步")
         return
+    version = {**(version or {}), **_count_fields(payload)}
     upstream_ahead = payload.get("ahead_by", 0)
     unique = payload.get("behind_by", 0)
     if unique > 0:
         _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
                   diverged_upstream_sha=upstream_sha,
                   last_error=f"fork 有 {unique} 个独有提交（落后上游 {upstream_ahead} 个），不会覆盖",
-                  **(version or {}))
+                  **version)
         log_event(db, row["id"], "blocked",
                   f"{row['full_name']} 分叉：{unique} 个独有提交，已停止自动同步")
     # unique == 0: someone else advanced the fork; retry next cycle.
@@ -725,6 +792,7 @@ def sync_one(db, client, row, node, forced=False):
         if row["status"] not in ("synced",):
             log_event(db, repo_id, "synced", f"{row['full_name']} 已与上游一致")
         _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
+                  upstream_ahead=0, fork_ahead=0,
                   last_check_at=now, last_success_at=now, last_error=None, **version)
         return "synced"
     if row["status"] == "diverged" and row["diverged_upstream_sha"] == upstream_sha:
@@ -737,6 +805,7 @@ def sync_one(db, client, row, node, forced=False):
         if confirmed != upstream_sha:
             raise RuntimeError(f"推送后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
         _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
+                  upstream_ahead=0, fork_ahead=0,
                   last_check_at=utcnow(), last_success_at=utcnow(), last_error=None, **version)
         log_event(db, repo_id, "synced",
                   f"{row['full_name']} 快进到 {upstream_sha[:12]}")

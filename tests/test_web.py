@@ -253,20 +253,32 @@ class WebTests(unittest.TestCase):
         behind = insert_repository(self.main.db, owner="me", name="behind",
                                    full_name="me/behind", upstream_full_name="up/behind",
                                    status="behind")
+        ahead = insert_repository(self.main.db, owner="me", name="ahead",
+                                  full_name="me/ahead", upstream_full_name="up/ahead")
         self.main.db.run("UPDATE repositories SET fork_sha=?, upstream_sha=? WHERE id=?",
                          ("c" * 40, "c" * 40, same))
         self.main.db.run("UPDATE repositories SET fork_sha=?, upstream_sha=? WHERE id=?",
                          ("d" * 40, "e" * 40, behind))
+        # A manual fork that already contains upstream plus its own commits: the
+        # label names the reason instead of leaving "不一致" unexplained.
+        self.main.db.run("UPDATE repositories SET fork_sha=?, upstream_sha=?, "
+                         "last_merged_upstream_sha=?, upstream_ahead=0, fork_ahead=15 "
+                         "WHERE id=?",
+                         ("f" * 40, "b" * 40, "b" * 40, ahead))
         response, page = self.rendered_page("/repos")
         # Each version line names its side so the two short SHAs can be matched.
         sides = [element["text"].strip() for element in page.find("span", **{"class": "version-side"})]
-        self.assertEqual(sides.count("本地"), 2)
-        self.assertEqual(sides.count("上游"), 2)
-        # A shared commit reads as one commit; a differing pair names the upstream SHA.
-        self.assertIn("同一提交", response.text)
+        self.assertEqual(sides.count("本地"), 3)
+        self.assertEqual(sides.count("上游"), 3)
+        # A shared commit reads as one version; a differing pair names the upstream SHA.
+        self.assertIn("同一版本", response.text)
         self.assertIn("c" * 12, response.text)
         self.assertIn("落后上游", response.text)
         self.assertIn("e" * 12, response.text)
+        self.assertIn("本地领先 15 个提交", response.text)
+        own_commits = page.find("span", **{"class": "verdict v-contains"})
+        self.assertEqual(len(own_commits), 1)
+        self.assertIn("无需更新", own_commits[0]["attrs"].get("title", ""))
         # The verdict is rendered once per row and carries the full SHA in its tooltip.
         verdicts = page.find("span", **{"class": "verdict v-same"})
         self.assertEqual(len(verdicts), 1)

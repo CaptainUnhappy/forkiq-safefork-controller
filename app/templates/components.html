@@ -25,5 +25,5 @@
 {%- endmacro %}
 
 {% macro verdict_chip(verdict) -%}
-<span class="verdict v-{{ verdict.kind }}" title="{{ verdict.title }}">{{ verdict.text }}{% if verdict.sha %}<span class="mono verdict-sha">{{ verdict.sha[:12] }}</span>{% endif %}</span>
+<span class="verdict v-{{ verdict.kind }}" title="{{ verdict.title }}"><span class="verdict-text">{{ verdict.text }}</span>{% if verdict.sha %}<span class="mono verdict-sha">{{ verdict.sha[:12] }}</span>{% endif %}</span>
 {%- endmacro %}
