@@ -285,14 +285,16 @@ class WebTests(unittest.TestCase):
         self.assertIn("c" * 40, verdicts[0]["attrs"].get("title", ""))
 
     def test_repository_row_shares_one_grid_across_local_and_upstream(self):
-        """两侧版本行同层：名称/标记/版本三行由同一个列优先网格共用。"""
+        """两侧版本行同层：名称/版本两行由同一个列优先网格共用。"""
         self.setup_admin()
         from app.db import insert_repository
         insert_repository(self.main.db, owner="me", name="demo",
                           full_name="me/demo", upstream_full_name="up/demo", discovered=1)
         self.main.db.run("UPDATE repositories SET mode='manual', self_update_interval=1")
         _, page = self.rendered_page("/repos")
-        # 前两列合并成一个单元格，网格子项必须按「本地三项 + 上游三项」排列。
+        # 手工 / 自更新 / 自动发现这些模式标记只属于仓库详情页，列表里不再重复。
+        self.assertEqual(page.find("span", **{"class": "tag"}), [])
+        # 前两列合并成一个单元格，网格子项必须按「本地两项 + 上游两项」排列。
         cell = page.find("td", colspan="2")
         self.assertEqual(len(cell), 1)
         pairs = page.inside(cell[0], "div", **{"class": "repo-pair"})
@@ -301,13 +303,12 @@ class WebTests(unittest.TestCase):
                     if element["parents"] and element["parents"][-1] is pairs[0]]
         self.assertEqual([[part for part in child["attrs"].get("class", "").split()]
                           for child in children],
-                         [["pair-name", "pair-local"], ["pair-flags", "pair-local"],
-                          ["version-line", "pair-local"], ["pair-name", "pair-upstream", "muted"],
-                          ["pair-flags", "pair-upstream"], ["version-line", "pair-upstream"]])
+                         [["pair-name", "pair-local"], ["version-line", "pair-local"],
+                          ["pair-name", "pair-upstream", "muted"], ["version-line", "pair-upstream"]])
         css = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.css").read_text(encoding="utf-8")
         rule = css.split(".repo-pair {", 1)[1].split("}", 1)[0]
         self.assertIn("grid-auto-flow: column", rule)
-        self.assertIn("grid-template-rows: auto auto auto", rule)
+        self.assertIn("grid-template-rows: auto auto", rule)
 
     def test_version_lines_keep_the_tag_slot_when_a_side_has_no_tag(self):
         """某侧没有可达标签时保留槽位，两侧版本行保持同一形状。"""

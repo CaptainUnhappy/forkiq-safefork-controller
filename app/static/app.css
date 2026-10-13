@@ -128,19 +128,15 @@ tr:hover td { background: var(--surface); }
 .repos th:nth-child(3) { width: 17%; }
 .repos th:nth-child(4) { width: 9%; }
 .repos th:nth-child(5) { width: 14%; }
-/* 本地与上游合并成一个网格：两侧各占一列，名称 / 标记 / 版本各占一行。
-   行由两侧共享，所以本地多一行标记只是把两侧的版本行一起下移，不会只错开本地。
-   两侧的子项顺序是网格的契约（列优先填充），不要插入额外子项。 */
-.repo-pair { display: grid; grid-auto-flow: column; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto auto auto; }
+/* 本地与上游合并成一个网格：两侧各占一列，名称 / 版本各占一行。
+   行由两侧共享，两侧的版本行因此永远同层。子项顺序是网格的契约
+   （列优先填充），不要插入额外子项。 */
+.repo-pair { display: grid; grid-auto-flow: column; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto auto; }
 .repo-pair > * { min-width: 0; }
 .pair-local { padding-right: 14px; }
 .pair-upstream { padding-left: 14px; }
 .pair-name { overflow-wrap: anywhere; }
 .pair-name.pair-local { font-weight: 500; }
-.pair-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.pair-flags .tag { margin-left: 0; }
-/* 空标记行保留在网格里占位（display:none 会让两侧的版本行错位）。 */
-.pair-flags:empty { margin-top: 0; }
 .version-line { margin-top: 4px; }
 .version-chip { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 /* 逐字折行会让短 SHA 失去可读性：每个片段整体换行，不在片段内部断开。 */
