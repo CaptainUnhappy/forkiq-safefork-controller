@@ -4,14 +4,16 @@
   <tr><th>仓库</th><th>上游</th><th>版本对比</th><th>状态</th><th>最近检查</th></tr>
   {% for r in repos %}
   <tr>
-    <td>
-      <div><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.mode == 'manual' %}<span class="tag">手工</span>{% endif %}{% if r.self_update_interval %}<span class="tag">自更新</span>{% endif %}{% if r.discovered %}<span class="tag">自动发现</span>{% endif %}{% if r.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</div>
-      <div class="version-line">{{ version_chip(r.fork_sha, r.fork_tag, r.fork_commit_at, side='本地', tone=r.fork_tone) }}</div>
-    </td>
-    <td class="muted" data-label="上游">
-      <div>{{ repo_link(r.upstream_full_name) }}</div>
-      <div class="version-line">{{ version_chip(r.upstream_sha, r.upstream_tag, r.upstream_commit_at, side='上游') }}</div>
-    </td>
+    {#- 本地与上游共用一个三行网格（名称 / 标记 / 版本），两侧的版本行因此
+        永远同层：本地多一行标记只把两侧的版本行一起下移，不会错开。 -#}
+    <td colspan="2"><div class="repo-pair">
+      <div class="pair-name pair-local"><span class="sr-only">fork 仓库：</span><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</div>
+      <div class="pair-flags pair-local">{% if r.mode == 'manual' %}<span class="tag">手工</span>{% endif %}{% if r.self_update_interval %}<span class="tag">自更新</span>{% endif %}{% if r.discovered %}<span class="tag">自动发现</span>{% endif %}</div>
+      <div class="version-line pair-local">{{ version_chip(r.fork_sha, r.fork_tag, r.fork_commit_at, side='本地', tone=r.fork_tone) }}</div>
+      <div class="pair-name pair-upstream muted"><span class="sr-only">上游仓库：</span>{{ repo_link(r.upstream_full_name) }}</div>
+      <div class="pair-flags pair-upstream"></div>
+      <div class="version-line pair-upstream">{{ version_chip(r.upstream_sha, r.upstream_tag, r.upstream_commit_at, side='上游') }}</div>
+    </div></td>
     <td data-label="版本对比">{{ verdict_chip(r.verdict) }}</td>
     <td data-label="状态">{{ status(r.status) }}
         {% if r.last_error %}<div class="err-hint">{{ r.last_error }}</div>{% endif %}</td>

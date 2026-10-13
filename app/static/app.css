@@ -123,20 +123,34 @@ tr:hover td { background: var(--surface); }
 /* Column widths are set so the five columns fit the panel without the last
    one sliding under the edge; the version lines wrap instead of widening. */
 .repos { min-width: 760px; table-layout: fixed; }
-.repos th:nth-child(1), .repos td:nth-child(1) { width: 30%; }
-.repos th:nth-child(2), .repos td:nth-child(2) { width: 30%; }
-.repos th:nth-child(3), .repos td:nth-child(3) { width: 17%; }
-.repos th:nth-child(4), .repos td:nth-child(4) { width: 9%; }
-.repos th:nth-child(5), .repos td:nth-child(5) { width: 14%; }
-.repos td:first-child { font-weight: 500; }
-.repos td:nth-child(2) { overflow-wrap: anywhere; }
+.repos th:nth-child(1) { width: 30%; }
+.repos th:nth-child(2) { width: 30%; }
+.repos th:nth-child(3) { width: 17%; }
+.repos th:nth-child(4) { width: 9%; }
+.repos th:nth-child(5) { width: 14%; }
+/* 本地与上游合并成一个网格：两侧各占一列，名称 / 标记 / 版本各占一行。
+   行由两侧共享，所以本地多一行标记只是把两侧的版本行一起下移，不会只错开本地。
+   两侧的子项顺序是网格的契约（列优先填充），不要插入额外子项。 */
+.repo-pair { display: grid; grid-auto-flow: column; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto auto auto; }
+.repo-pair > * { min-width: 0; }
+.pair-local { padding-right: 14px; }
+.pair-upstream { padding-left: 14px; }
+.pair-name { overflow-wrap: anywhere; }
+.pair-name.pair-local { font-weight: 500; }
+.pair-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.pair-flags .tag { margin-left: 0; }
+/* 空标记行保留在网格里占位（display:none 会让两侧的版本行错位）。 */
+.pair-flags:empty { margin-top: 0; }
 .version-line { margin-top: 4px; }
-.version-chip { display: inline-flex; align-items: center; gap: 6px; }
+.version-chip { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* 逐字折行会让短 SHA 失去可读性：每个片段整体换行，不在片段内部断开。 */
+.version-chip > span { white-space: nowrap; }
 .version-chip .version-side { padding: 0 5px; border-radius: 4px; background: var(--surface); color: var(--muted); font-size: 10px; }
 .version-chip .sha { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
 .version-chip .sha-behind { color: var(--amber); }
 .version-chip .sha-unsynced { color: var(--red); }
 .version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
+.version-chip .tag-version.tag-missing { color: var(--muted); font-weight: 400; }
 .version-chip .version-date { font-size: 11px; }
 /* One comparison label per row: the two short SHAs above are matched by this. */
 .verdict { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 8px; margin-bottom: 4px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; }
@@ -145,7 +159,7 @@ tr:hover td { background: var(--surface); }
 .v-behind { background: var(--warning-soft); color: var(--amber); }
 .v-unsynced, .v-gone { background: var(--danger-soft); color: var(--red); }
 .v-pending { background: var(--surface); color: var(--muted); }
-.repos td:nth-child(3) .verdict { display: flex; width: fit-content; }
+.repos td:nth-child(2) .verdict { display: flex; width: fit-content; }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }
 .s-synced, .kind-synced, .kind-merge { background: var(--primary-soft); color: var(--green); }
 .s-behind, .s-pending, .kind-discover { background: var(--primary-soft); color: var(--primary); }
@@ -267,12 +281,17 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   .repos tr:last-child, .events tr:last-child { border-bottom: 0; }
   .repos td, .events td { display: block; padding: 0; border: 0; min-width: 0; overflow-wrap: anywhere; }
   .repos td { grid-column: 1 / -1; }
-  .repos td:first-child { font-size: 14px; }
+  /* 卡片里两侧改回上下堆叠：本地块在前，上游块在后。 */
+  .repo-pair { display: block; }
+  .pair-local, .pair-upstream { padding: 0; }
+  .pair-name { font-size: 14px; }
+  .pair-name.pair-upstream { font-size: 11px; }
+  .pair-name.pair-upstream::before { content: "上游："; display: block; }
+  .version-line { font-size: 12px; }
   /* Local and upstream version lines stay adjacent so the two SHAs read as a pair. */
-  .repos td:nth-child(2) { grid-row: 2; }
-  .repos td:nth-child(3) { grid-row: 3; grid-column: 1; }
-  .repos td:nth-child(4) { grid-row: 3; grid-column: 2; }
-  .repos td:nth-child(5) { grid-row: 4; }
+  .repos td:nth-child(2) { grid-row: 2; grid-column: 1; }
+  .repos td:nth-child(3) { grid-row: 2; grid-column: 2; }
+  .repos td:nth-child(4) { grid-row: 3; }
   .repos td[data-label] { font-size: 11px; white-space: normal; }
   .repos td[data-label]::before { content: attr(data-label) "："; }
   .repos .version-line { white-space: nowrap; }

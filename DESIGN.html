@@ -193,7 +193,7 @@ components:
 <h3>External links</h3>
 <p>仓库名与上游名以文本链接直接指向 <code>https://github.com/&lt;owner&gt;/&lt;repo&gt;</code>，在仓库列表、仓库详情与概览事件中保持一致。仓库列表保留仓库名的面板内详情链接，其右侧用图标入口打开 GitHub，图标为（13px）、<code>rounded.tag</code>、白底细边框，悬停转为浅绿底与主色边框。外部链接统一使用 <code>target="_blank"</code> 与 <code>rel="noopener"</code>；名称缺失时显示 <code>—</code>，不生成空链接。</p>
 <h3>Versions</h3>
-<p>仓库列表把版本号直接放在仓库名与上游名下方（<code>version-line</code>），左右两列同层对齐，便于逐行比对本地与上游是否一致；仓库详情用「上游版本」「fork 版本」两行展示。每侧版本由 <code>version_chip</code> 宏渲染：最近标签（存在时，绿色 <code>tag-version</code>）、12 位短 SHA（<code>mono</code>）与提交日期（<code>version-date</code>，<code>muted</code>）。标签取自各默认分支可达的最新标签，缺失时省略而不占位。版本信息随每次检查从同一批 GraphQL 节点更新，不额外增加请求。</p>
+<p>仓库列表把版本号直接放在仓库名与上游名下方（<code>version-line</code>）：两侧合用一个三行网格（<code>repo-pair</code>，名称 / 标记 / 版本，列优先填充），本地多一行标记只会把两侧的版本行一起下移，两行始终同层对齐，便于逐行比对本地与上游是否一致；仓库详情用「上游版本」「fork 版本」两行展示。每侧版本由 <code>version_chip</code> 宏渲染：最近标签（绿色 <code>tag-version</code>）、12 位短 SHA（<code>mono</code>）与提交日期（<code>version-date</code>，<code>muted</code>）；片段整体换行，不在短 SHA 内部断开。标签取自各默认分支可达的最新标签；某侧没有可达标签时保留槽位，用 <code>tag-missing</code> 的灰色 <code>—</code> 占位（悬停说明原因），避免两侧形状不一致。版本信息随每次检查从同一批 GraphQL 节点更新，不额外增加请求。</p>
 <p>仓库不再与上游相连（上游被删除、fork 被提升为独立仓库）时，仓库名或上游名后追加琥珀色 <code>tag-warn</code> 标签「上游已删除」，并保留在管理列表中，不自动移除。</p>
 <h3>Cards / Containers</h3>
 <p>卡片使用统一背景、圆角和轻阴影。表格嵌入卡片，表头与悬停使用 <code>surface</code>；错误提示允许长文本换行，不裁掉定位问题所需的信息。</p>

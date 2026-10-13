@@ -21,7 +21,7 @@
 {%- endmacro %}
 
 {% macro version_chip(sha, tag, commit_at, side='', tone='', label='提交') -%}
-<span class="version-chip"{% if sha %} title="{{ label }} {{ sha }}"{% endif %}>{% if side %}<span class="version-side">{{ side }}</span>{% endif %}{% if tag %}<span class="tag tag-version">{{ tag }}</span>{% endif %}<span class="mono sha {{ tone }}">{{ sha[:12] if sha else '—' }}</span>{% if commit_at %}<span class="version-date muted">{{ commit_at[:10] }}</span>{% endif %}</span>
+<span class="version-chip"{% if sha %} title="{{ label }} {{ sha }}"{% endif %}>{% if side %}<span class="version-side">{{ side }}</span>{% endif %}<span class="tag tag-version{% if not tag %} tag-missing{% endif %}"{% if not tag %} title="{{ side or '该提交' }}没有可达的版本标签"{% endif %}>{{ tag or '—' }}</span><span class="mono sha {{ tone }}">{{ sha[:12] if sha else '—' }}</span>{% if commit_at %}<span class="version-date muted">{{ commit_at[:10] }}</span>{% endif %}</span>
 {%- endmacro %}
 
 {% macro verdict_chip(verdict) -%}
