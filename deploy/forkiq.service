@@ -1,17 +1,15 @@
 [Unit]
 Description=ForkIQ GitHub fork sync panel
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
 
 [Service]
 Type=simple
 User=forkiq
 Group=forkiq
 WorkingDirectory=/opt/forkiq
-# Reachable only through Nginx Proxy Manager: ufw allows 8792 from the docker
-# subnets and denies it everywhere else (never exposed on the public internet).
-ExecStart=/opt/forkiq/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8792 --workers 1
+# Only the local HTTPS reverse proxy may reach the application listener.
+ExecStart=/opt/forkiq/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8792 --workers 1
 Environment=FORKIQ_STATE_DIR=/var/lib/forkiq
 # App private key lives in the service's own state dir: the sandbox makes /etc
 # read-only, and the manifest callback must write the PEM at runtime.

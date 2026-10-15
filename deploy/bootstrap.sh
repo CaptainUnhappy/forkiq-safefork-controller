@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# ForkIQ initial provisioning on us2; refuses to touch an existing installation.
+# ForkIQ initial provisioning; refuses to touch an existing installation.
 for path in /opt/forkiq /etc/forkiq /var/lib/forkiq /etc/systemd/system/forkiq.service; do
     if test -e "$path"; then
         printf 'Refusing existing target: %s\n' "$path" >&2
@@ -29,10 +29,5 @@ python3 -m venv .venv
 chown -R root:root /opt/forkiq
 chmod -R go-w /opt/forkiq
 
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    # Only the docker bridge (Nginx Proxy Manager) may reach the panel port.
-    ufw allow from 172.16.0.0/12 to any port 8792 proto tcp comment 'ForkIQ via NPM' >/dev/null
-    ufw deny 8792/tcp >/dev/null || true
-    printf 'ufw: 8792 restricted to docker bridge\n'
-fi
+# The service binds loopback; no public or Docker bridge firewall rule is needed.
 printf 'Provisioned ForkIQ account and directories. Install code, then: systemctl daemon-reload && systemctl enable --now forkiq.service\n'

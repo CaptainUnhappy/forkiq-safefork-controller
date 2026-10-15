@@ -12,8 +12,9 @@ ForkIQ 是一个自托管的单人面板：用 GitHub App 连接账号、自动�
 - **版本对比**：每个仓库同时显示本地与上游的最新 tag、短 SHA、提交日期，并直接回答两边是不是同一个版本：同一版本 / 本地领先 N 个提交（上游更新已全部并入，差异来自 fork 自有提交）/ 落后上游 N 个提交 / 与上游分叉 / 检查失败。
 - **上游消失不删本地**：上游被删除或改名时只标记待处理，fork 与历史原样保留。
 - **自更新保活**（可选）：上游 Actions 静默超过 24 小时时，触发 fork 自己的 workflow。
-- **操作可追溯**：每次检查、合并、阻塞、错误都进事件流，失败原因写在列表里。
-- **后台刷新**：列表只替换数据区域并带 ETag，空闲刷新不传输内容，也不重载整页。
+- **统计下钻**：概览五项数字可点击进入对应仓库列表，待同步与需关注使用一致的分组筛选。
+- **操作可追溯**：每次检查、合并、阻塞、错误都进事件流；列表保留状态，异常全文在详情浮层或仓库详情查看，不撑坏表格。
+- **后台刷新**：只替换数据区域，revision 未变化直接返回 204，跳过内容构建与渲染；阅读详情或编辑表单时不打断。带内容哈希的 CSS/JS 使用长期缓存。
 
 ## 快速开始
 
@@ -34,7 +35,7 @@ App 需要的权限：`contents: write`、`administration: write`、`workflows: 
 
 ## 部署
 
-`deploy/bootstrap.sh` 在干净的 Linux 主机上创建 `forkiq` 服务账号与目录，`deploy/forkiq.service` 是 systemd 单元（默认监听 `127.0.0.1:8792`，只允许 Nginx Proxy Manager 所在网段访问）。把代码放到 `/opt/forkiq`、装好依赖后：
+`deploy/bootstrap.sh` 在干净的 Linux 主机上创建 `forkiq` 服务账号与目录，`deploy/forkiq.service` 是 systemd 单元（只监听 `127.0.0.1:8792`，由同机 HTTPS 反向代理访问）。把代码放到 `/opt/forkiq`、装好依赖后：
 
 ```sh
 systemctl daemon-reload && systemctl enable --now forkiq
