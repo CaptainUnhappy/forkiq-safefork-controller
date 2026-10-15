@@ -1,10 +1,10 @@
 {% from "components.html" import event_kind, repo_link %}
 <section class="stats card" id="stats-region" data-revision="{{ revision }}">
-  <div class="stat"><span class="num">{{ total }}</span><span class="label">受管仓库</span></div>
-  <div class="stat ok"><span class="num">{{ synced }}</span><span class="label">已同步</span></div>
-  <div class="stat"><span class="num">{{ behind }}</span><span class="label">待同步</span></div>
-  <div class="stat warn"><span class="num">{{ blocked }}</span><span class="label">需关注</span></div>
-  <div class="stat"><span class="num">{{ paused }}</span><span class="label">已暂停</span></div>
+  <a class="stat" href="/repos"><span class="num">{{ total }}</span><span class="label">受管仓库</span></a>
+  <a class="stat ok" href="/repos?filter=synced"><span class="num">{{ synced }}</span><span class="label">已同步</span></a>
+  <a class="stat" href="/repos?filter=waiting"><span class="num">{{ behind }}</span><span class="label">待同步</span></a>
+  <a class="stat warn" href="/repos?filter=attention"><span class="num">{{ blocked }}</span><span class="label">需关注</span></a>
+  <a class="stat" href="/repos?filter=paused"><span class="num">{{ paused }}</span><span class="label">已暂停</span></a>
 </section>
 <section class="card" id="events-region">
   <h2>最近事件</h2>

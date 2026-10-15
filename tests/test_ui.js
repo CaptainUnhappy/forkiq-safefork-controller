@@ -28,16 +28,36 @@ function element() {
     setAttribute(name, value) { attributes.set(name, value); },
     getAttribute(name) { return attributes.get(name) ?? null; },
     removeAttribute(name) { attributes.delete(name); },
+    hasAttribute(name) { return attributes.has(name); },
   };
 }
 
 // Execute the production script with isolated browser primitives and no network.
-function page({ confirm = true, storageFails = false } = {}) {
+function page({ confirm = true, storageFails = false, dialogSupported = true, dialogPresent = true } = {}) {
   const form = element();
   const button = element();
   const themeButton = element();
   const region = element();
   const browser = element();
+  const dialog = element();
+  const errorTitle = element();
+  const errorRepo = element();
+  const errorMessage = element();
+  const closeButton = element();
+  const links = new Set();
+  region.contains = candidate => links.has(candidate);
+  dialog.open = false;
+  dialog.querySelector = selector => ({
+    '#error-dialog-title': errorTitle,
+    '#error-dialog-repo': errorRepo,
+    '#error-dialog-message': errorMessage,
+    '[data-error-close]': closeButton,
+  })[selector] || null;
+  dialog.getBoundingClientRect = () => ({ left: 100, right: 740, top: 100, bottom: 500 });
+  if (dialogSupported) {
+    dialog.showModal = () => { dialog.open = true; document.activeElement = closeButton; };
+  }
+  dialog.close = () => { dialog.open = false; dialog.dispatch('close'); };
   browser.matchMedia = () => ({ matches: false });
   browser.scrollX = 0;
   browser.scrollY = 0;
@@ -70,6 +90,7 @@ function page({ confirm = true, storageFails = false } = {}) {
     return selector.split(',').flatMap(part => {
       const name = part.trim();
       if (name === '.theme-toggle') return [themeButton];
+      if (name === '#error-dialog') return dialogPresent ? [dialog] : [];
       if (name === '[data-auto-refresh]') {
         return [{ dataset: { autoRefresh: '30', refreshRegion: 'repo-table-region' } }];
       }
@@ -81,16 +102,31 @@ function page({ confirm = true, storageFails = false } = {}) {
       return [];
     });
   }
+  const idleFocus = { matches() { return false; } };
   const document = {
+    ...element(),
     documentElement: root,
     hidden: false,
     body: { classList: { contains() { return false; } } },
     // Focus may move away from the disabled submit button before a POST completes.
-    activeElement: { matches() { return false; } },
+    activeElement: idleFocus,
     querySelectorAll: select,
     querySelector(selector) { return select(selector)[0] || null; },
-    addEventListener() {},
   };
+  closeButton.matches = selector => selector === 'input, select, textarea, button';
+  function createErrorLink(data = {}) {
+    const link = element();
+    link.dataset = {
+      errorRepo: 'me/demo', errorStatus: '存在分叉', errorMessage: 'GitHub merge conflict', ...data,
+    };
+    link.isConnected = true;
+    link.matches = selector => selector === 'a[href]' || selector === 'a.error-details';
+    link.closest = selector => link.matches(selector) ? link : null;
+    link.focus = () => { document.activeElement = link; };
+    links.add(link);
+    return link;
+  }
+  const errorLink = createErrorLink();
   vm.runInNewContext(source, {
     window: browser,
     document,
@@ -102,6 +138,17 @@ function page({ confirm = true, storageFails = false } = {}) {
   }, { filename: 'app/static/app.js' });
   return {
     form, button, themeButton, browser, root, region, fetches,
+    document, dialog, errorTitle, errorRepo, errorMessage, closeButton, errorLink, createErrorLink,
+    clickError(link = errorLink, values = {}) {
+      return document.dispatch('click', { button: 0, target: link, ...values });
+    },
+    closeError() { closeButton.dispatch('click'); },
+    cancelError() {
+      const event = dialog.dispatch('cancel');
+      if (!event.defaultPrevented) dialog.close();
+      return event;
+    },
+    focusOutside() { document.activeElement = idleFocus; },
     setFetchResponse(response) { fetchResponse = response; },
     tick() { for (const callback of intervals) callback(); },
     // Interval callbacks await the fragment fetch; let that microtask settle.
@@ -120,6 +167,151 @@ function page({ confirm = true, storageFails = false } = {}) {
     get confirmations() { return confirmations; },
   };
 }
+
+test('delegated details show a plain-text snapshot and focus returns to its link', () => {
+  const current = page();
+  const message = '<img src=x onerror="alert(1)">\n' + '超长异常'.repeat(200);
+  current.errorLink.dataset.errorMessage = message;
+  const child = { closest: selector => selector === 'a.error-details' ? current.errorLink : null };
+  const event = current.clickError(current.errorLink, { target: child });
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(current.dialog.open, true);
+  assert.equal(current.errorTitle.textContent, '状态详情 · 存在分叉');
+  assert.equal(current.errorRepo.textContent, 'me/demo');
+  assert.equal(current.errorMessage.textContent, message);
+  assert.equal(current.errorMessage.innerHTML, undefined);
+  current.errorLink.dataset.errorMessage = 'changed after opening';
+  assert.equal(current.errorMessage.textContent, message);
+  current.closeError();
+  assert.equal(current.dialog.open, false);
+  assert.equal(current.document.activeElement, current.errorLink);
+});
+
+test('delegation opens a details link added by a later fragment refresh', () => {
+  const current = page();
+  const added = current.createErrorLink({ errorRepo: 'me/added', errorStatus: '检查失败', errorMessage: 'new failure' });
+  assert.equal(current.clickError(added).defaultPrevented, true);
+  assert.equal(current.errorRepo.textContent, 'me/added');
+  assert.equal(current.errorMessage.textContent, 'new failure');
+  current.closeError();
+  assert.equal(current.document.activeElement, added);
+});
+
+test('modified clicks and explicit new-tab or download links keep native navigation', () => {
+  const current = page();
+  for (const values of [{ button: 1 }, { button: 2 }, { ctrlKey: true }, { metaKey: true },
+                        { shiftKey: true }, { altKey: true }]) {
+    assert.equal(current.clickError(current.errorLink, values).defaultPrevented, false);
+    assert.equal(current.dialog.open, false);
+  }
+  current.errorLink.setAttribute('target', '_blank');
+  assert.equal(current.clickError().defaultPrevented, false);
+  current.errorLink.removeAttribute('target');
+  current.errorLink.setAttribute('download', '');
+  assert.equal(current.clickError().defaultPrevented, false);
+  assert.equal(current.dialog.open, false);
+});
+
+test('missing native dialog support leaves the repository detail link usable', () => {
+  for (const options of [{ dialogSupported: false }, { dialogPresent: false }]) {
+    const current = page(options);
+    assert.equal(current.clickError().defaultPrevented, false);
+    assert.equal(current.dialog.open, false);
+    assert.equal(current.errorMessage.textContent, undefined);
+  }
+});
+
+test('keyboard activation opens details and native dialog cancellation restores focus', () => {
+  const current = page();
+  current.errorLink.focus();
+  assert.equal(current.clickError(current.errorLink, { button: undefined }).defaultPrevented, true);
+  assert.equal(current.dialog.open, true);
+  // Browsers close native modal dialogs on an uncancelled Escape/cancel event.
+  assert.equal(current.cancelError().defaultPrevented, false);
+  assert.equal(current.dialog.open, false);
+  assert.equal(current.document.activeElement, current.errorLink);
+});
+
+test('only a click outside the dialog bounds dismisses its backdrop', () => {
+  const current = page();
+  current.clickError();
+  current.dialog.dispatch('click', { target: current.dialog, clientX: 140, clientY: 150 });
+  assert.equal(current.dialog.open, true);
+  current.dialog.dispatch('click', { target: current.dialog, clientX: 20, clientY: 20 });
+  assert.equal(current.dialog.open, false);
+  assert.equal(current.document.activeElement, current.errorLink);
+});
+
+test('closing details does not focus a link removed from the document', () => {
+  const current = page();
+  current.clickError();
+  current.errorLink.isConnected = false;
+  current.closeError();
+  assert.notEqual(current.document.activeElement, current.errorLink);
+});
+
+test('refresh pauses while details are open or the returned link retains focus', async () => {
+  const current = page();
+  current.clickError();
+  current.focusOutside();
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 0);
+  current.closeError();
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 0);
+  current.focusOutside();
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 1);
+  assert.equal(current.region.innerHTML, '<p>rows</p>');
+});
+
+test('an in-flight refresh cannot replace the list after details open', async () => {
+  const current = page();
+  let resolveFetch;
+  current.setFetchResponse(new Promise(resolve => { resolveFetch = resolve; }));
+  const refresh = current.tickAsync();
+  assert.equal(current.fetches.length, 1);
+  current.clickError();
+  current.focusOutside();
+  resolveFetch({ status: 200, ok: true, text: async () => '<p>changed rows</p>' });
+  await refresh;
+  assert.equal(current.dialog.open, true);
+  assert.equal(current.region.innerHTML, undefined);
+  assert.equal(current.errorMessage.textContent, 'GitHub merge conflict');
+  current.closeError();
+  current.focusOutside();
+  current.setFetchResponse({ status: 200, ok: true, text: async () => '<p>latest rows</p>' });
+  await current.tickAsync();
+  assert.equal(current.region.innerHTML, '<p>latest rows</p>');
+});
+
+test('links focused inside the list protect focus before and after a fetch', async () => {
+  const current = page();
+  current.errorLink.focus();
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 0);
+  current.focusOutside();
+  let resolveFetch;
+  current.setFetchResponse(new Promise(resolve => { resolveFetch = resolve; }));
+  const refresh = current.tickAsync();
+  current.errorLink.focus();
+  resolveFetch({ status: 200, ok: true, text: async () => '<p>new rows</p>' });
+  await refresh;
+  assert.equal(current.region.innerHTML, undefined);
+  assert.equal(current.document.activeElement, current.errorLink);
+});
+
+test('only one background fetch runs while its response is pending', async () => {
+  const current = page();
+  let resolveFetch;
+  current.setFetchResponse(new Promise(resolve => { resolveFetch = resolve; }));
+  const refresh = current.tickAsync();
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 1);
+  resolveFetch({ status: 204, ok: true, text: async () => '' });
+  await refresh;
+  assert.equal(current.region.innerHTML, undefined);
+});
 
 test('background refresh swaps the list region instead of reloading the page', async () => {
   const current = page();

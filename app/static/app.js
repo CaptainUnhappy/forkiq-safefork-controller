@@ -61,6 +61,40 @@
     });
   }
 
+  const errorDialog = document.querySelector('#error-dialog');
+  if (errorDialog && typeof errorDialog.showModal === 'function') {
+    const title = errorDialog.querySelector('#error-dialog-title');
+    const repo = errorDialog.querySelector('#error-dialog-repo');
+    const message = errorDialog.querySelector('#error-dialog-message');
+    const close = errorDialog.querySelector('[data-error-close]');
+    let trigger = null;
+    document.addEventListener('click', event => {
+      const link = event.target.closest?.('a.error-details');
+      if (!link || event.defaultPrevented || event.button > 0 ||
+          event.ctrlKey || event.metaKey || event.shiftKey || event.altKey ||
+          (link.getAttribute('target') && link.getAttribute('target') !== '_self') ||
+          link.hasAttribute('download')) return;
+      event.preventDefault();
+      if (errorDialog.open) return;
+      trigger = link;
+      title.textContent = link.dataset.errorStatus ? '状态详情 · ' + link.dataset.errorStatus : '状态详情';
+      repo.textContent = link.dataset.errorRepo || '';
+      message.textContent = link.dataset.errorMessage || '';
+      errorDialog.showModal();
+    });
+    close.addEventListener('click', () => errorDialog.close());
+    errorDialog.addEventListener('click', event => {
+      if (event.target !== errorDialog) return;
+      const bounds = errorDialog.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right ||
+          event.clientY < bounds.top || event.clientY > bounds.bottom) errorDialog.close();
+    });
+    errorDialog.addEventListener('close', () => {
+      if (trigger?.isConnected) trigger.focus();
+      trigger = null;
+    });
+  }
+
   document.querySelectorAll('form').forEach(form => {
     form.addEventListener('input', () => { form.dataset.editing = 'true'; });
     form.addEventListener('submit', event => {
@@ -84,10 +118,11 @@
   const refresh = document.querySelector('[data-auto-refresh]');
   if (refresh) {
     const region = document.querySelector('#' + refresh.dataset.refreshRegion);
-    // Do not discard typed form values, background tabs or an open mobile menu.
+    // Keep reading and keyboard focus intact, including while a fetch is in flight.
     const busy = () => document.hidden || document.body.classList.contains('nav-open') ||
-      document.querySelector('form[data-editing], form[data-submitting]') ||
-      document.activeElement?.matches('input, select, textarea, button');
+      errorDialog?.open || document.querySelector('form[data-editing], form[data-submitting]') ||
+      document.activeElement?.matches('input, select, textarea, button') ||
+      (region?.contains(document.activeElement) && document.activeElement?.matches('a[href]'));
     let inFlight = false;
     // Cloudflare rewrites the HTML it proxies and drops the ETag header, so the
     // revision the server stamps into the markup is sent back as a query

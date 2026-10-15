@@ -105,6 +105,8 @@ section.card { margin-bottom: 20px; }
 .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 24px; padding: 0; overflow: hidden; }
 .stat { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 26px 12px; gap: 6px; }
 .stat + .stat { border-left: 1px solid var(--line); }
+a.stat:hover { background: var(--surface); text-decoration: none; }
+a.stat:focus-visible { outline-offset: -3px; }
 .stat .num { color: var(--ink); font-size: 32px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; }
 .stat .label { color: var(--muted); font-size: 12px; }
 .stat.ok .num { color: var(--green); }
@@ -123,10 +125,10 @@ tr:hover td { background: var(--surface); }
 /* Column widths are set so the five columns fit the panel without the last
    one sliding under the edge; the version lines wrap instead of widening. */
 .repos { min-width: 760px; table-layout: fixed; }
-.repos th:nth-child(1) { width: 30%; }
-.repos th:nth-child(2) { width: 30%; }
+.repos th:nth-child(1) { width: 28.5%; }
+.repos th:nth-child(2) { width: 28.5%; }
 .repos th:nth-child(3) { width: 17%; }
-.repos th:nth-child(4) { width: 9%; }
+.repos th:nth-child(4) { width: 12%; }
 .repos th:nth-child(5) { width: 14%; }
 /* 本地与上游合并成一个网格：两侧各占一列，名称 / 版本各占一行。
    行由两侧共享，两侧的版本行因此永远同层。子项顺序是网格的契约
@@ -174,6 +176,15 @@ tr:hover td { background: var(--surface); }
 .notice.warn { color: var(--amber); background: var(--warning-soft); }
 .error { color: var(--red); background: var(--danger-soft); }
 .err-hint { color: var(--red); margin-top: 6px; font-size: 12px; max-width: 44ch; overflow-wrap: anywhere; }
+.error-details { display: table; margin-top: 4px; font-size: 12px; white-space: nowrap; }
+#error-dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; padding: 24px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: auto; }
+#error-dialog:not([open]) { display: none; }
+#error-dialog::backdrop { background: rgba(15, 28, 20, .45); }
+#error-dialog-title { margin-bottom: 8px; padding-right: 64px; overflow-wrap: anywhere; }
+#error-dialog-repo { margin-bottom: 16px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+#error-dialog-message { max-height: min(55dvh, 520px); padding: 14px 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; overscroll-behavior: contain; }
+#error-dialog [data-error-close] { position: absolute; top: 16px; right: 16px; color: var(--muted); background: var(--surface); border-color: var(--line); }
+#error-dialog [data-error-close]:hover { color: var(--primary); background: var(--primary-soft); border-color: var(--primary); }
 .back-link { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 20px; color: var(--muted); font-size: 13px; }
 .back-link .icon { width: 14px; height: 14px; transform: rotate(180deg); }
 .kv { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px 20px; margin: 0 0 24px; }

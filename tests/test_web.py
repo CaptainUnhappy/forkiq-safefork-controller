@@ -176,6 +176,87 @@ class WebTests(unittest.TestCase):
         self.assertIn("GitHub denied &lt;unsafe&gt;", response.text)
         self.assertNotIn("<unsafe>", response.text)
 
+    def test_overview_links_match_grouped_repository_lists(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        ids = {}
+        for state in ("synced", "behind", "pending", "blocked", "diverged",
+                      "needs_attention", "error", "paused", "missing"):
+            ids[state] = insert_repository(self.main.db, owner="me", name=state,
+                                          full_name=f"me/{state}", upstream_full_name=f"up/{state}",
+                                          status=state)
+        self.main.db.run("UPDATE repositories SET last_error='old error' WHERE status='paused'")
+        _, page = self.rendered_page("/")
+        stats = page.find("section", id="stats-region")[0]
+        links = page.inside(stats, "a")
+        expected = [("/repos", set(ids), "受管仓库"),
+                    ("/repos?filter=synced", {"synced"}, "已同步"),
+                    ("/repos?filter=waiting", {"behind", "pending"}, "待同步"),
+                    ("/repos?filter=attention", {"blocked", "diverged", "needs_attention", "error"}, "需关注"),
+                    ("/repos?filter=paused", {"paused"}, "已暂停")]
+        self.assertEqual(len(links), len(expected))
+        for link, (href, states, label) in zip(links, expected):
+            with self.subTest(href=href):
+                self.assertEqual(link["attrs"]["href"], href)
+                self.assertIn(label, link["text"])
+                self.assertEqual(page.inside(link, "span", **{"class": "num"})[0]["text"], str(len(states)))
+                full, listing = self.rendered_page(href)
+                rows = {int(urlsplit(a["attrs"]["href"]).path.rsplit("/", 1)[1])
+                        for a in listing.find("a")
+                        if a["attrs"].get("href", "").startswith("/repos/")
+                        and not urlsplit(a["attrs"]["href"]).fragment}
+                self.assertEqual(rows, {ids[state] for state in states})
+                partial = self.client.get(href.replace("/repos", "/partials/repos", 1))
+                self.assertEqual(partial.status_code, 200)
+                for state in ids:
+                    marker = f'href="/repos/{ids[state]}"'
+                    self.assertEqual(marker in partial.text, state in states)
+                self.assertIn('data-revision="', full.text)
+        for state in ("diverged", "blocked", "error"):
+            _, listing = self.rendered_page(f"/repos?filter={state}")
+            self.assertTrue(listing.find("a", href=f"/repos/{ids[state]}"))
+            self.assertEqual(len(listing.find("table")), 1)
+
+    def test_empty_filter_keeps_a_revision_and_clear_filter_link(self):
+        self.setup_admin()
+        for query in ("attention", "waiting", "not-a-status", "' OR 1=1 --"):
+            with self.subTest(query=query):
+                response = self.client.get("/partials/repos", params={"filter": query})
+                self.assertEqual(response.status_code, 200)
+                page = RenderedHTML(response.text)
+                self.assertIn("没有符合筛选条件的仓库", response.text)
+                self.assertTrue(page.find("a", href="/repos"))
+                revision = [node["attrs"]["data-revision"] for node in page.elements
+                            if "data-revision" in node["attrs"]][0]
+                self.assertEqual(self.client.get("/partials/repos", params={"filter": query, "v": revision}).status_code, 204)
+        _, overview = self.rendered_page("/")
+        self.assertEqual(len(overview.inside(overview.find("section", id="stats-region")[0], "a")), 5)
+        self.assertIn("还没有受管仓库", self.client.get("/repos").text)
+
+    def test_repository_errors_are_full_text_dialog_data_outside_the_refresh_region(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="broken",
+                                    full_name="me/broken", upstream_full_name="up/broken", status="diverged")
+        message = '中文错误 <script>alert("unsafe")</script> & "quoted"\n' + "X" * 3000
+        self.main.db.run("UPDATE repositories SET last_error=? WHERE id=?", (message, repo_id))
+        response, page = self.rendered_page("/repos")
+        trigger = page.find("a", href=f"/repos/{repo_id}#repo-error")[0]
+        self.assertEqual(trigger["attrs"]["data-error-message"], message)
+        self.assertEqual(trigger["attrs"]["data-error-repo"], "me/broken")
+        self.assertEqual(trigger["attrs"]["data-error-status"], "存在分叉")
+        self.assertEqual(trigger["text"], "查看详情")
+        self.assertNotIn('<script>alert("unsafe")</script>', response.text)
+        self.assertEqual(len(page.find("dialog", id="error-dialog")), 1)
+        dialog = page.find("dialog", id="error-dialog")[0]
+        self.assertFalse(any(parent["attrs"].get("id") == "repo-table-region" for parent in dialog["parents"]))
+        self.assertFalse(page.find("div", **{"class": "err-hint"}))
+        _, detail = self.rendered_page(f"/repos/{repo_id}")
+        self.assertEqual(detail.find("dd", id="repo-error")[0]["text"], message)
+        partial = self.client.get("/partials/repos")
+        self.assertIn("data-error-message=", partial.text)
+        self.assertNotIn("<dialog", partial.text)
+
     def test_repository_and_upstream_names_link_to_github(self):
         self.setup_admin()
         from app.db import insert_repository
@@ -344,7 +425,7 @@ class WebTests(unittest.TestCase):
                 self.assertNotIn("app.css", response.text)
         filtered = self.client.get("/partials/repos?filter=blocked")
         self.assertEqual(filtered.status_code, 200)
-        self.assertIn("还没有受管仓库", filtered.text)
+        self.assertIn("没有符合筛选条件的仓库", filtered.text)
 
     def test_full_page_stamps_the_revision_the_refresh_sends_back(self):
         self.setup_admin()
@@ -392,6 +473,57 @@ class WebTests(unittest.TestCase):
         self.assertEqual(changed.status_code, 200)
         self.assertIn("boom", changed.text)
         self.assertNotIn(f'data-revision="{revision}"', changed.text)
+
+    def test_unchanged_fragments_skip_context_construction(self):
+        self.setup_admin()
+        for path, revision, builders in (
+            ("/partials/repos", self.main._repos_revision(""), ("_repo_rows", "annotate")),
+            ("/partials/overview", self.main._overview_revision(), ("_overview_context",)),
+        ):
+            with self.subTest(path=path):
+                with mock.patch.object(self.main, builders[0], side_effect=AssertionError("built unchanged context")):
+                    if len(builders) > 1:
+                        with mock.patch.object(self.main, builders[1], side_effect=AssertionError("annotated unchanged rows")):
+                            response = self.client.get(path, params={"v": revision})
+                    else:
+                        response = self.client.get(path, params={"v": revision})
+                self.assertEqual(response.status_code, 204)
+                self.assertEqual(response.headers["cache-control"], "no-store")
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get("/partials/repos", params={"v": self.main._repos_revision("")}).status_code, 401)
+
+    def test_revisions_track_nonmax_row_errors_and_overview_settings(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        ids = [insert_repository(self.main.db, owner="me", name=f"repo-{i}",
+                                 full_name=f"me/repo-{i}", upstream_full_name=f"up/repo-{i}", status="error")
+               for i in range(2)]
+        self.main.db.run("UPDATE repositories SET updated_at='2026-10-15T00:00:00+00:00'")
+        revision = self.main._repos_revision("attention")
+        overview_revision = self.main._overview_revision()
+        self.main.db.run("UPDATE repositories SET last_error='new diagnosis' WHERE id=?", (ids[0],))
+        self.assertNotEqual(revision, self.main._repos_revision("attention"))
+        self.assertEqual(self.client.get("/partials/repos", params={"filter": "attention", "v": revision}).status_code, 200)
+        self.assertNotEqual(overview_revision, self.main._overview_revision())
+        for key, value in (("auth_error", "installation expired"), ("github_installation_id", "123")):
+            before = self.main._overview_revision()
+            self.main.db.set_setting(key, value)
+            self.assertNotEqual(before, self.main._overview_revision())
+            self.assertEqual(self.client.get("/partials/overview", params={"v": before}).status_code, 200)
+        self.assertNotEqual(self.main._repos_revision("waiting"), self.main._repos_revision("attention"))
+
+    def test_static_asset_cache_requires_the_current_content_hash(self):
+        self.setup_admin()
+        for name in ("app.css", "app.js"):
+            path = f"/static/{name}"
+            response = self.client.get(path, params={"v": self.main.ASSET_VERSION})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
+            for query in (None, "old-version"):
+                response = self.client.get(path, params={"v": query} if query else {})
+                self.assertEqual(response.headers["cache-control"], "no-cache")
+        self.assertEqual(self.client.get("/static/icons.svg", params={"v": self.main.ASSET_VERSION}).headers["cache-control"], "no-cache")
+        self.assertNotIn("immutable", self.client.get("/repos").headers.get("cache-control", ""))
 
     def test_static_assets_use_content_hash_cache_buster(self):
         self.setup_admin()

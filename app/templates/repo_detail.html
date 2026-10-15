@@ -23,7 +23,7 @@
         <dt>fork 版本</dt><dd>{{ version_chip(repo.fork_sha, repo.fork_tag, repo.fork_commit_at, side='本地', tone=fork_tone) }}</dd>
         <dt>最近成功</dt><dd>{{ repo.last_success_at or '—' }}</dd>
         <dt>最近检查</dt><dd>{{ repo.last_check_at or '—' }}</dd>
-        {% if repo.last_error %}<dt>最近错误</dt><dd class="err-hint">{{ repo.last_error }}</dd>{% endif %}
+        {% if repo.last_error %}<dt>最近错误</dt><dd id="repo-error" class="err-hint">{{ repo.last_error }}</dd>{% endif %}
         {% if repo.diverged_at %}<dt>分叉于</dt><dd>{{ repo.diverged_at }}（上游 {{ repo.diverged_upstream_sha[:12] if repo.diverged_upstream_sha }}）</dd>{% endif %}
       </dl>
       <div class="actions">

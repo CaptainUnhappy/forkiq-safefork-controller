@@ -12,6 +12,8 @@
     <div class="filters">
         <a class="chip-link {% if not filter %}active{% endif %}" href="/repos">全部</a>
         <a class="chip-link {% if filter == 'synced' %}active{% endif %}" href="/repos?filter=synced">已同步</a>
+        <a class="chip-link {% if filter == 'waiting' %}active{% endif %}" href="/repos?filter=waiting">待同步</a>
+        <a class="chip-link {% if filter == 'attention' %}active{% endif %}" href="/repos?filter=attention">需关注</a>
         <a class="chip-link {% if filter == 'diverged' %}active{% endif %}" href="/repos?filter=diverged">分叉</a>
         <a class="chip-link {% if filter == 'blocked' %}active{% endif %}" href="/repos?filter=blocked">阻塞</a>
         <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">暂停</a>
@@ -29,4 +31,10 @@
     <section class="card">
       <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>
     </section>
+    <dialog id="error-dialog" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-repo error-dialog-message">
+      <button type="button" class="secondary" data-error-close autofocus>关闭</button>
+      <h2 id="error-dialog-title">状态详情</h2>
+      <p id="error-dialog-repo"></p>
+      <div id="error-dialog-message" tabindex="0"></div>
+    </dialog>
 {% endblock %}

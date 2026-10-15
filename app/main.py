@@ -25,8 +25,14 @@ SESSION_TTL = 7 * 86400
 MANIFEST_URL = "https://github.com/settings/apps/new"
 
 app = FastAPI(title="ForkIQ", docs_url=None, redoc_url=None)
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
+
+STATUS_GROUPS = {
+    "synced": ("synced",),
+    "waiting": ("behind", "pending"),
+    "attention": ("blocked", "diverged", "needs_attention", "error"),
+    "paused": ("paused",),
+}
 
 
 def asset_version(*names):
@@ -43,6 +49,19 @@ def asset_version(*names):
 
 
 ASSET_VERSION = asset_version("app.css", "app.js")
+
+
+class VersionedStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path in ("app.css", "app.js") and Request(scope).query_params.get("v") == ASSET_VERSION:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", VersionedStaticFiles(directory=BASE / "static"), name="static")
 
 
 db = DB(STATE_DIR / "forkiq.db")
@@ -273,28 +292,28 @@ def overview(request: Request):
     return render(request, "overview.html", **_overview_context())
 
 
-def _overview_context():
+def _overview_context(revision=None):
+    revision = revision or _overview_revision()
     stats = {row["status"]: row["n"] for row in
              db.all("SELECT status, COUNT(*) AS n FROM repositories GROUP BY status")}
-    total = sum(stats.values())
-    synced = stats.get("synced", 0)
-    behind = stats.get("behind", 0) + stats.get("pending", 0)
-    blocked = stats.get("blocked", 0) + stats.get("diverged", 0) + stats.get("needs_attention", 0) + stats.get("error", 0)
-    paused = stats.get("paused", 0)
+    counts = {group: sum(stats.get(status, 0) for status in statuses)
+              for group, statuses in STATUS_GROUPS.items()}
     events = db.all("SELECT e.*, r.full_name FROM events e LEFT JOIN repositories r ON r.id=e.repo_id "
                     "ORDER BY e.id DESC LIMIT 20")
-    return {"stats": stats, "total": total, "synced": synced, "behind": behind,
-            "blocked": blocked, "paused": paused, "events": events,
+    return {"stats": stats, "total": sum(stats.values()), "synced": counts["synced"],
+            "behind": counts["waiting"], "blocked": counts["attention"],
+            "paused": counts["paused"], "events": events,
             "auth_error": db.get_setting("auth_error", ""),
             "app_connected": bool(db.get_setting("github_installation_id")),
-            "revision": _overview_revision()}
+            "revision": revision}
 
 
 def _overview_revision():
-    return _revision("SELECT (SELECT COUNT(*) FROM repositories), "
-                     "(SELECT COALESCE(MAX(updated_at),'') FROM repositories), "
-                     "(SELECT COALESCE(MAX(id),0) FROM events), "
-                     "(SELECT COUNT(*) FROM events)")
+    return _revision("SELECT ?, (SELECT COALESCE(MAX(id),0) FROM events), "
+                     "(SELECT COUNT(*) FROM events), "
+                     "(SELECT value FROM settings WHERE key='auth_error'), "
+                     "(SELECT value FROM settings WHERE key='github_installation_id')",
+                     (_repos_revision(""),))
 
 
 @app.get("/repos", response_class=HTMLResponse)
@@ -302,48 +321,54 @@ def repo_list(request: Request, filter: str = ""):
     guard = require_login(request)
     if guard:
         return guard
-    return render(request, "repos.html", repos=annotate(_repo_rows(filter)),
-                  filter=filter, revision=_repos_revision(filter))
+    return render(request, "repos.html", **_repo_list_context(filter))
+
+
+def _repo_filter(filter):
+    if not filter:
+        return "", ()
+    statuses = STATUS_GROUPS.get(filter, (filter,))
+    return " WHERE status IN (" + ",".join("?" for _ in statuses) + ")", statuses
 
 
 def _repo_rows(filter):
-    query = "SELECT * FROM repositories"
-    params = ()
-    if filter:
-        query += " WHERE status=?"
-        params = (filter,)
-    query += " ORDER BY status='diverged' DESC, status='blocked' DESC, full_name"
-    return db.all(query, params)
+    where, params = _repo_filter(filter)
+    return db.all("SELECT * FROM repositories" + where +
+                  " ORDER BY status='diverged' DESC, status='blocked' DESC, full_name", params)
+
+
+def _repo_list_context(filter):
+    revision = _repos_revision(filter)
+    return {"repos": annotate(_repo_rows(filter)), "filter": filter, "revision": revision}
 
 
 def _repos_revision(filter):
+    where, params = _repo_filter(filter)
+    # MAX timestamps miss changes to a different row in the same second. Hash the
+    # displayed fields instead, without building version labels or fetching events.
     return _revision(
-        "SELECT COUNT(*), COALESCE(MAX(updated_at),''), COALESCE(MAX(last_check_at),''), "
-        "COALESCE(MAX(status),''), COALESCE(MAX(COALESCE(upstream_gone,0)),0) FROM repositories"
-        + (" WHERE status=?" if filter else ""),
-        (filter,) if filter else ())
+        "SELECT id, full_name, upstream_full_name, status, last_error, last_check_at, "
+        "fork_sha, upstream_sha, fork_tag, upstream_tag, fork_commit_at, upstream_commit_at, "
+        "upstream_gone, last_merged_upstream_sha, upstream_ahead, fork_ahead "
+        "FROM repositories" + where + " ORDER BY id", params)
 
 
 def _revision(sql, params=()):
-    """Cheap change token from one aggregate query.
+    """Hash a small snapshot; the query parameters also identify its filter.
 
-    Cloudflare rewrites the HTML it proxies and drops the `ETag` header with
-    it, so a browser can never send `If-None-Match`. The client therefore sends
-    the revision it already has as a query parameter, and an unchanged tick is
-    answered with `204` before any template work happens. `updated_at` is
-    written by every repository update, so it captures any change the fragment
-    could show.
+    Cloudflare can remove HTML ETags, so the browser sends this token as `v`.
+    An unchanged tick can then skip context construction as well as rendering.
     """
-    row = db.one(sql, params)
-    return hashlib.sha256(repr(tuple(row)).encode()).hexdigest()[:16]
+    rows = tuple(tuple(row) for row in db.all(sql, params))
+    return hashlib.sha256(repr((params, rows)).encode()).hexdigest()[:16]
 
 
-def _fragment(request, name, context, revision):
-    """Render a fragment, or answer 204 when the client already has it."""
+def _fragment(request, name, context_factory, revision):
+    """Only build the fragment's context when the snapshot has changed."""
     headers = {"Cache-Control": "no-store", "X-ForkIQ-Revision": revision}
     if request.query_params.get("v") == revision:
         return Response(status_code=204, headers=headers)
-    html = templates.get_template(name).render(**context)
+    html = templates.get_template(name).render(**context_factory())
     return HTMLResponse(html, headers=headers)
 
 
@@ -352,10 +377,10 @@ def partial_repos(request: Request, filter: str = ""):
     """Rows only, for the background refresh: no shell, no full page reload."""
     if not current_session(request):
         return JSONResponse({"error": "未登录"}, status_code=401)
-    rows = _repo_rows(filter)
     revision = _repos_revision(filter)
     return _fragment(request, "partials/repo_table.html",
-                     {"repos": annotate(rows), "revision": revision}, revision)
+                     lambda: {"repos": annotate(_repo_rows(filter)), "filter": filter,
+                              "revision": revision}, revision)
 
 
 @app.get("/partials/overview", response_class=HTMLResponse)
@@ -363,8 +388,9 @@ def partial_overview(request: Request):
     """Stats and recent events only, for the overview's background refresh."""
     if not current_session(request):
         return JSONResponse({"error": "未登录"}, status_code=401)
-    context = _overview_context()
-    return _fragment(request, "partials/overview_regions.html", context, context["revision"])
+    revision = _overview_revision()
+    return _fragment(request, "partials/overview_regions.html",
+                     lambda: _overview_context(revision), revision)
 
 
 @app.get("/repos/{repo_id}", response_class=HTMLResponse)
@@ -503,8 +529,7 @@ def repo_add(request: Request, url: str = Form(""), csrf: str = Form("")):
     try:
         repo_id = add_manual(db, client, url)
     except ValueError as error:
-        repos = db.all("SELECT * FROM repositories ORDER BY full_name")
-        return render(request, "repos.html", repos=repos, filter="", add_error=str(error))
+        return render(request, "repos.html", **_repo_list_context(""), add_error=str(error))
     worker.request_sync()
     return RedirectResponse(f"/repos/{repo_id}", status_code=302)
 
