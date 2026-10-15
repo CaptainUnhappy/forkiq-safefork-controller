@@ -140,11 +140,11 @@ class GitHub:
             raise RefNotFound(f"{full_name} 没有分支 {branch}")
         return payload["object"]["sha"]
 
-    def update_ref(self, full_name, branch, sha):
+    def update_ref(self, full_name, branch, sha, force=False):
         status, payload, _ = self._request(
             "PATCH", f"{API}/repos/{full_name}/git/refs/heads/{branch}",
             {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"sha": sha, "force": False})
+             "Accept": "application/vnd.github+json"}, {"sha": sha, "force": bool(force)})
         if status == 422:
             raise RefNotFastForward(str(payload)[:300])
         if status == 403:

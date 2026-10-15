@@ -433,7 +433,7 @@ def _repo_action(request, repo_id, csrf, action):
         db.run("UPDATE repositories SET mode=?, status='pending', last_error=NULL, "
                "diverged_at=NULL, diverged_upstream_sha=NULL, sync_requested=1, "
                "updated_at=? WHERE id=?", (mode, utcnow(), repo_id))
-        label = "手工 fork（保留自有提交，上游更新自动合并）" if mode == "manual" else "镜像（严格跟随上游）"
+        label = "手工 fork（保留自有提交，上游更新自动合并）" if mode == "manual" else "镜像（严格跟随上游，不留 fork 自有提交）"
         log_event(db, repo_id, "check", f"{repo['full_name']} 同步方式切换为{label}")
         worker.request_sync()
     elif action == "selfupdate":

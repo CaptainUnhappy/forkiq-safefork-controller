@@ -648,35 +648,6 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
     return "error"
 
 
-def _classify_non_ff(db, client, row, upstream_sha, version=None):
-    """Decide between diverged (fork has unique commits) and a lost race.
-
-    compare(base=fork, head=upstream): ahead_by counts upstream commits the
-    fork lacks; behind_by counts commits unique to the fork. A None result
-    means GitHub reports no common ancestor (fork history was rewritten).
-    """
-    payload = client.compare(row["full_name"], row["branch"],
-                             f"{row['upstream_full_name'].split('/')[0]}:{row['branch']}")
-    if payload is None:
-        _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
-                  diverged_upstream_sha=upstream_sha,
-                  last_error="fork 与上游无共同祖先（历史被重写），不会覆盖", **(version or {}))
-        log_event(db, row["id"], "blocked",
-                  f"{row['full_name']} 与上游无共同祖先，已停止自动同步")
-        return
-    version = {**(version or {}), **_count_fields(payload)}
-    upstream_ahead = payload.get("ahead_by", 0)
-    unique = payload.get("behind_by", 0)
-    if unique > 0:
-        _set_repo(db, row["id"], status="diverged", diverged_at=utcnow(),
-                  diverged_upstream_sha=upstream_sha,
-                  last_error=f"fork 有 {unique} 个独有提交（落后上游 {upstream_ahead} 个），不会覆盖",
-                  **version)
-        log_event(db, row["id"], "blocked",
-                  f"{row['full_name']} 分叉：{unique} 个独有提交，已停止自动同步")
-    # unique == 0: someone else advanced the fork; retry next cycle.
-
-
 def sync_one(db, client, row, node, forced=False):
     """Apply one repository's observed state. Returns final status."""
     repo_id = row["id"]
@@ -795,10 +766,6 @@ def sync_one(db, client, row, node, forced=False):
                   upstream_ahead=0, fork_ahead=0,
                   last_check_at=now, last_success_at=now, last_error=None, **version)
         return "synced"
-    if row["status"] == "diverged" and row["diverged_upstream_sha"] == upstream_sha:
-        _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha, upstream_sha=upstream_sha,
-                  **version)
-        return "diverged"
     try:
         client.update_ref(row["full_name"], row["branch"], upstream_sha)
         confirmed = client.get_ref(row["full_name"], row["branch"])
@@ -811,8 +778,33 @@ def sync_one(db, client, row, node, forced=False):
                   f"{row['full_name']} 快进到 {upstream_sha[:12]}")
         return "synced"
     except RefNotFastForward:
-        _classify_non_ff(db, client, row, upstream_sha, version)
-        return "blocked"
+        # A mirror follows upstream exactly: the fork is not allowed to hold its
+        # own commits, so when upstream rewrote history (or the fork still
+        # carries older commits) the ref is moved onto upstream's head instead
+        # of freezing the repository in a diverged state.
+        try:
+            client.update_ref(row["full_name"], row["branch"], upstream_sha, force=True)
+            confirmed = client.get_ref(row["full_name"], row["branch"])
+            if confirmed != upstream_sha:
+                raise RuntimeError(f"强制对齐后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
+        except (RateLimited, AuthError):
+            raise
+        except Forbidden as error:
+            return _classify_forbidden(db, client, row, upstream_sha, error, version)
+        except Exception as error:
+            message = str(error)[:300]
+            if row["status"] != "error" or row["last_error"] != message:
+                log_event(db, repo_id, "error", f"{row['full_name']} 强制对齐失败：{message}")
+            _set_repo(db, repo_id, status="error", last_check_at=utcnow(),
+                      last_error=message, **version)
+            return "error"
+        _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
+                  upstream_ahead=0, fork_ahead=0, diverged_at=None,
+                  diverged_upstream_sha=None, last_check_at=utcnow(), last_success_at=utcnow(),
+                  last_error=None, **version)
+        log_event(db, repo_id, "synced",
+                  f"{row['full_name']} 已强制对齐到上游 {upstream_sha[:12]}（镜像模式，不保留 fork 自有提交）")
+        return "synced"
     except Forbidden as error:
         return _classify_forbidden(db, client, row, upstream_sha, error, version)
     except (RateLimited, AuthError):

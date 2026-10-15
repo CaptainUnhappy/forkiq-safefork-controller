@@ -14,7 +14,7 @@
         <dt>同步分支</dt><dd>{{ repo.branch }}</dd>
         <dt>同步方式</dt>
         <dd>{% if repo.mode == 'manual' %}手工 fork：保留 fork 自有提交，上游更新自动合并；fork 自己的 Actions 可独立更新内容，不依赖上游是否开启 Actions
-            {% else %}镜像：严格跟随上游，fork 有独有提交时停止并标记分叉{% endif %}</dd>
+            {% else %}镜像：严格跟随上游，分支始终停在与上游相同的提交；fork 不留自有提交，上游改写历史时直接对齐{% endif %}</dd>
         <dt>自更新保活</dt>
         <dd>{% if repo.self_update_interval %}{{ repo.self_update or '已开启，等待检查' }}
             {% else %}未开启{% endif %}</dd>

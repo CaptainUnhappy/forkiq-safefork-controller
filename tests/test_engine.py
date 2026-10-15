@@ -41,6 +41,7 @@ class StubGitHub:
         self.installation = []   # repo dicts for discover
         self.calls = []
         self.ref_error = {}      # full_name -> exception
+        self.forced_refs = []    # (full_name, sha) moved with force
         self.get_ref_error = {}  # full_name -> exception (transient read failure)
         self.compare_result = {"ahead_by": 0, "behind_by": 0}
         self.compare_error = False
@@ -63,8 +64,10 @@ class StubGitHub:
         self.calls.append(("graphql", tuple(variables["ids"])))
         return {"nodes": [self.nodes.get(i) for i in variables["ids"]]}
 
-    def update_ref(self, full_name, branch, sha):
+    def update_ref(self, full_name, branch, sha, force=False):
         self.calls.append(("update_ref", full_name, branch, sha))
+        if force:
+            self.forced_refs.append((full_name, sha))
         if full_name in self.ref_error:
             raise self.ref_error.pop(full_name)
         self.refs[full_name] = sha
@@ -193,20 +196,57 @@ class EngineTests(unittest.TestCase):
         self.assertIn(("update_ref", "me/demo", "main", "b" * 40), self.client.calls)
         self.assertIn(("get_ref", "me/demo"), self.client.calls)
 
-    def test_non_ff_with_unique_commits_marks_diverged(self):
+    def test_mirror_force_aligns_when_the_fork_holds_its_own_commits(self):
+        # A mirror must equal upstream: when a fast-forward is refused because
+        # the fork carries commits upstream does not have, the ref is moved onto
+        # upstream's head instead of freezing the repository as diverged.
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
         self.client.ref_error["me/demo"] = RefNotFastForward("422")
-        # compare(base=fork, head=upstream): ahead_by = upstream commits fork lacks,
-        # behind_by = commits unique to the fork.
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        self.assertEqual(self.row()["diverged_upstream_sha"], "b" * 40)
-        self.assertIn("3 个独有提交", self.row()["last_error"])
-        # The counts are kept next to the SHAs: the list explains "not the same
-        # version" with them instead of probing on every page load.
-        self.assertEqual(self.row()["fork_ahead"], 3)
-        self.assertEqual(self.row()["upstream_ahead"], 5)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.row()["fork_sha"], "b" * 40)
+        self.assertEqual(self.client.refs["me/demo"], "b" * 40)
+        self.assertEqual(self.client.forced_refs, [("me/demo", "b" * 40)])
+        self.assertEqual(self.row()["fork_ahead"], 0)
+        self.assertEqual(self.row()["upstream_ahead"], 0)
+        self.assertIsNone(self.row()["last_error"])
+        events = [row["message"] for row in self.db.all(
+            "SELECT message FROM events WHERE kind='synced' ORDER BY id")]
+        self.assertTrue(any("强制对齐" in message for message in events), events)
+
+    def test_mirror_aligns_again_when_upstream_rewrites_history(self):
+        # No common ancestor means upstream rewrote its history; the mirror
+        # still follows it rather than keeping the old commits.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        # Upstream rewrites again: the same cycle re-aligns without freezing.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "c" * 40)
+        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.client.refs["me/demo"], "c" * 40)
+        self.assertEqual(self.client.forced_refs[-1], ("me/demo", "c" * 40))
+        self.assertEqual(self.row()["diverged_at"], None)
+        self.assertEqual(self.row()["diverged_upstream_sha"], None)
+
+    def test_mirror_does_not_touch_an_aligned_repository(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "b" * 40, "b" * 40)
+        self.client.refs["me/demo"] = "b" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertFalse(any(c[0] == "update_ref" for c in self.client.calls))
+        self.assertEqual(self.client.forced_refs, [])
+
+    def test_mirror_force_alignment_after_a_lost_race(self):
+        # The fork is strictly behind (someone else advanced upstream between the
+        # read and the push); the mirror still ends up equal to upstream.
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.client.refs["me/demo"], "b" * 40)
 
     def test_same_commit_records_zero_counts(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
@@ -220,41 +260,6 @@ class EngineTests(unittest.TestCase):
         engine.run_cycle(self.db, self.client)
         self.assertEqual(self.row()["upstream_ahead"], 0)
         self.assertEqual(self.row()["fork_ahead"], 0)
-
-    def test_diverged_is_sticky_until_upstream_advances(self):
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
-        engine.run_cycle(self.db, self.client)
-        calls_after_first = sum(1 for c in self.client.calls if c[0] == "compare")
-        engine.run_cycle(self.db, self.client)  # same upstream: no new compare, no push
-        self.assertEqual(self.status(), "diverged")
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "compare"), calls_after_first)
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "update_ref"), 1)
-        # upstream advances: retry and re-classify
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "c" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        self.assertEqual(self.row()["diverged_upstream_sha"], "c" * 40)
-
-    def test_non_ff_without_unique_commits_stays_behind_for_next_cycle(self):
-        # Fork strictly behind upstream (lost race): upstream has commits the fork
-        # lacks, but the fork has none of its own -> not diverged, retry next cycle.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 0}
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "pending")
-
-    def test_no_common_ancestor_marks_diverged(self):
-        # GitHub compare 404 "No common ancestor": history was rewritten.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
-        self.client.compare_result = None
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        self.assertIn("无共同祖先", self.row()["last_error"])
 
     def test_forbidden_with_workflow_changes_reports_actionable_message(self):
         from app.github import Forbidden
