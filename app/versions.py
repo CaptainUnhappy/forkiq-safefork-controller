@@ -106,8 +106,9 @@ def fork_tone(verdict):
 def short_time(value):
     """`2026-10-12T12:29:46+00:00` -> `10-12 12:29`.
 
-    The raw ISO string widened the list enough to push the last column off
-    screen once the comparison column was added; the detail page keeps it.
+    Every timestamp the panel shows is rendered through this filter, so the
+    list, the detail page and the event tables read the same. The value is UTC;
+    the browser re-renders each one in the viewer's own timezone.
     """
     if not value or "T" not in value:
         return value or "—"
@@ -123,6 +124,5 @@ def annotate(rows):
         verdict = version_verdict(item)
         item["verdict"] = verdict
         item["fork_tone"] = fork_tone(verdict)
-        item["checked_at"] = short_time(item.get("last_check_at"))
         annotated.append(item)
     return annotated

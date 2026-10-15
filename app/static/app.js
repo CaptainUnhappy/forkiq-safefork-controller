@@ -61,6 +61,21 @@
     });
   }
 
+  // Timestamps are stored in UTC. The server renders a short UTC form so the
+  // page works without scripting; the browser re-renders every stamp in the
+  // viewer's own timezone, including in fragments swapped in later.
+  const pad = value => String(value).padStart(2, '0');
+  function localizeTimes(root) {
+    (root || document).querySelectorAll('time.ts[datetime]').forEach(element => {
+      const when = new Date(element.getAttribute('datetime'));
+      if (Number.isNaN(when.getTime())) return;
+      element.textContent = pad(when.getMonth() + 1) + '-' + pad(when.getDate()) + ' ' +
+        pad(when.getHours()) + ':' + pad(when.getMinutes());
+      element.title = when.toLocaleString();
+    });
+  }
+  localizeTimes();
+
   const errorDialog = document.querySelector('#error-dialog');
   if (errorDialog && typeof errorDialog.showModal === 'function') {
     const title = errorDialog.querySelector('#error-dialog-title');
@@ -142,7 +157,7 @@
         // 204: nothing changed since the last tick, so the DOM stays untouched.
         if (response.status === 204 || !response.ok) return;
         const html = await response.text();
-        if (!busy() && region.innerHTML !== html) region.innerHTML = html;
+        if (!busy() && region.innerHTML !== html) { region.innerHTML = html; localizeTimes(region); }
       } catch { /* Keep the current view; the next tick retries. */ }
       finally { inFlight = false; }
     };

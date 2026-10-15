@@ -257,6 +257,27 @@ class WebTests(unittest.TestCase):
         self.assertIn("data-error-message=", partial.text)
         self.assertNotIn("<dialog", partial.text)
 
+    def test_timestamps_render_short_and_keep_the_machine_readable_value(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        self.main.db.run("UPDATE repositories SET last_check_at=?, last_success_at=? WHERE id=?",
+                         ("2026-10-15T03:55:19+00:00", "2026-10-15T03:55:19+00:00", repo_id))
+        self.main.db.run("INSERT INTO events(repo_id, at, kind, message) VALUES(?,?,?,?)",
+                         (repo_id, "2026-10-15T03:55:19+00:00", "synced", "me/demo 快进到 abc123"))
+        for path in ("/", "/repos", f"/repos/{repo_id}"):
+            with self.subTest(path=path):
+                response, page = self.rendered_page(path)
+                stamps = [element for element in page.find("time")
+                          if "ts" in element["attrs"].get("class", "").split()]
+                self.assertTrue(stamps, path)
+                self.assertTrue(any(element["attrs"].get("datetime") == "2026-10-15T03:55:19+00:00"
+                                    for element in stamps), path)
+                self.assertTrue(any(element["text"] == "10-15 03:55" for element in stamps), path)
+                # The raw ISO string must never be the visible text.
+                self.assertNotIn(">2026-10-15T03:55:19+00:00<", response.text)
+
     def test_repository_and_upstream_names_link_to_github(self):
         self.setup_admin()
         from app.db import insert_repository

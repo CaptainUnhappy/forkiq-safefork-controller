@@ -77,6 +77,10 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
   const revisionNode = element();
   revisionNode.dataset.revision = 'rev-1';
   region.querySelector = () => revisionNode;
+  // One stored timestamp, rendered by the server as a short UTC string.
+  const timeStamp = element();
+  timeStamp.setAttribute('datetime', '2026-10-15T03:55:19+00:00');
+  timeStamp.textContent = '10-15 03:55';
   browser.confirm = () => { confirmations++; return confirm; };
   browser.fetch = (url, options) => {
     fetches.push({ url, options });
@@ -95,6 +99,7 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
         return [{ dataset: { autoRefresh: '30', refreshRegion: 'repo-table-region' } }];
       }
       if (name === '#repo-table-region') return [region];
+      if (name === 'time.ts[datetime]') return timeStamp.getAttribute('datetime') ? [timeStamp] : [];
       if (name === 'form') return [form];
       if (name === 'button[aria-busy]') return button.getAttribute('aria-busy') ? [button] : [];
       const field = /^form\[data-(editing|submitting)\]$/.exec(name);
@@ -102,6 +107,8 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
       return [];
     });
   }
+  // A refreshed fragment is re-scanned for timestamps in the viewer's timezone.
+  region.querySelectorAll = select;
   const idleFocus = { matches() { return false; } };
   const document = {
     ...element(),
@@ -137,7 +144,7 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
     setInterval(callback) { intervals.push(callback); },
   }, { filename: 'app/static/app.js' });
   return {
-    form, button, themeButton, browser, root, region, fetches,
+    form, button, themeButton, browser, root, region, fetches, timeStamp,
     document, dialog, errorTitle, errorRepo, errorMessage, closeButton, errorLink, createErrorLink,
     clickError(link = errorLink, values = {}) {
       return document.dispatch('click', { button: 0, target: link, ...values });
@@ -445,4 +452,24 @@ test('unavailable theme storage does not break theme controls or refresh guards'
   current.form.dispatch('reset');
   await current.tickAsync();
   assert.equal(current.fetches.length, 1);
+});
+
+test('stored timestamps are rewritten in the viewer timezone', async () => {
+  const current = page();
+  const expected = (when => String(when.getMonth() + 1).padStart(2, '0') + '-' +
+    String(when.getDate()).padStart(2, '0') + ' ' +
+    String(when.getHours()).padStart(2, '0') + ':' +
+    String(when.getMinutes()).padStart(2, '0'))(new Date('2026-10-15T03:55:19+00:00'));
+  assert.equal(current.timeStamp.textContent, expected);
+  assert.match(current.timeStamp.textContent, /^\d\d-\d\d \d\d:\d\d$/);
+  assert.equal(current.timeStamp.title, new Date('2026-10-15T03:55:19+00:00').toLocaleString());
+});
+
+test('a refreshed fragment has its timestamps rewritten too', async () => {
+  const current = page();
+  current.timeStamp.textContent = '10-15 03:55';
+  current.setFetchResponse({ status: 200, ok: true, text: async () => '<p>rows</p>' });
+  await current.tickAsync();
+  assert.match(current.timeStamp.textContent, /^\d\d-\d\d \d\d:\d\d$/);
+  assert.notEqual(current.timeStamp.textContent, '10-15 03:55');
 });

@@ -16,7 +16,7 @@ from .db import DB, log_event, utcnow
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
 from .github import AuthError, exchange_manifest, write_pem
-from .versions import annotate, fork_tone, version_verdict
+from .versions import annotate, fork_tone, short_time, version_verdict
 
 STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
 PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", "/var/lib/forkiq/app.pem")
@@ -26,6 +26,9 @@ MANIFEST_URL = "https://github.com/settings/apps/new"
 
 app = FastAPI(title="ForkIQ", docs_url=None, redoc_url=None)
 templates = Jinja2Templates(directory=BASE / "templates")
+# Stored timestamps are UTC ISO strings; the panel renders them short and the
+# browser re-renders them in the viewer's own timezone.
+templates.env.filters["short_time"] = short_time
 
 STATUS_GROUPS = {
     "synced": ("synced",),

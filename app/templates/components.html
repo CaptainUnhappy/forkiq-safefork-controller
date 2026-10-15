@@ -7,6 +7,10 @@
 {{ labels.get(value, value) }}
 {%- endmacro %}
 
+{% macro timestamp(value) -%}
+{% if value %}<time class="ts" datetime="{{ value }}" title="{{ value }}">{{ value | short_time }}</time>{% else %}—{% endif %}
+{%- endmacro %}
+
 {% macro status(value) -%}
 <span class="badge s-{{ value }}" title="{{ value }}">{{ status_label(value) }}</span>
 {%- endmacro %}

@@ -1,4 +1,4 @@
-{% from "components.html" import status, status_label, github_link, repo_link, version_chip, verdict_chip %}
+{% from "components.html" import status, status_label, github_link, repo_link, version_chip, verdict_chip, timestamp %}
 <div data-revision="{{ revision }}">
 {% if repos %}
 <div class="table-wrap" role="region" aria-label="仓库列表" tabindex="0"><table class="repos">
@@ -17,7 +17,7 @@
     <td data-label="版本对比">{{ verdict_chip(r.verdict) }}</td>
     <td data-label="状态">{{ status(r.status) }}
         {% if r.last_error %}<a class="error-details" href="/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}">查看详情</a>{% endif %}</td>
-    <td class="muted" data-label="最近检查" {% if r.last_check_at %}title="{{ r.last_check_at }}"{% endif %}>{{ r.checked_at }}</td>
+    <td class="muted" data-label="最近检查">{{ timestamp(r.last_check_at) }}</td>
   </tr>
   {% endfor %}
 </table></div>
