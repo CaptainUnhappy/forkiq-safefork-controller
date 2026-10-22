@@ -1,4 +1,4 @@
-{% from "components.html" import event_kind, repo_link, timestamp %}
+{% from "components.html" import event_kind, repo_link, timestamp, error_message %}
 <section class="stats card" id="stats-region" data-revision="{{ revision }}">
   <a class="stat" href="/repos"><span class="num">{{ total }}</span><span class="label">受管仓库</span></a>
   <a class="stat ok" href="/repos?filter=synced"><span class="num">{{ synced }}</span><span class="label">已同步</span></a>
@@ -13,7 +13,7 @@
     <tr><th>时间</th><th>类型</th><th>仓库</th><th>说明</th></tr>
     {% for e in events %}
     <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td>
-        <td>{{ repo_link(e.full_name) }}</td><td>{{ e.message }}</td></tr>
+        <td>{{ repo_link(e.full_name) }}</td><td>{{ error_message(e.message) if e.kind in ('error', 'blocked', 'auth') else e.message }}</td></tr>
     {% endfor %}
   </table></div>
   {% else %}<p class="muted">还没有事件。连接 GitHub 后会自动开始检查。</p>{% endif %}

@@ -81,6 +81,9 @@
     const title = errorDialog.querySelector('#error-dialog-title');
     const repo = errorDialog.querySelector('#error-dialog-repo');
     const message = errorDialog.querySelector('#error-dialog-message');
+    const summary = errorDialog.querySelector('#error-dialog-summary');
+    const action = errorDialog.querySelector('#error-dialog-action');
+    const technical = errorDialog.querySelector('#error-dialog-technical');
     const close = errorDialog.querySelector('[data-error-close]');
     let trigger = null;
     document.addEventListener('click', event => {
@@ -95,6 +98,13 @@
       title.textContent = link.dataset.errorStatus ? '状态详情 · ' + link.dataset.errorStatus : '状态详情';
       repo.textContent = link.dataset.errorRepo || '';
       message.textContent = link.dataset.errorMessage || '';
+      summary.textContent = link.dataset.errorSummary || '';
+      action.textContent = link.dataset.errorAction || '';
+      summary.hidden = !summary.textContent;
+      action.hidden = !action.textContent;
+      technical.open = !summary.textContent;
+      errorDialog.setAttribute('aria-describedby', summary.textContent ?
+        'error-dialog-repo error-dialog-summary error-dialog-action' : 'error-dialog-repo error-dialog-message');
       errorDialog.showModal();
     });
     close.addEventListener('click', () => errorDialog.close());
@@ -135,9 +145,10 @@
     const region = document.querySelector('#' + refresh.dataset.refreshRegion);
     // Keep reading and keyboard focus intact, including while a fetch is in flight.
     const busy = () => document.hidden || document.body.classList.contains('nav-open') ||
-      errorDialog?.open || document.querySelector('form[data-editing], form[data-submitting]') ||
+      errorDialog?.open || region?.querySelector('details[open]') ||
+      document.querySelector('form[data-editing], form[data-submitting]') ||
       document.activeElement?.matches('input, select, textarea, button') ||
-      (region?.contains(document.activeElement) && document.activeElement?.matches('a[href]'));
+      (region?.contains(document.activeElement) && document.activeElement?.matches('a[href], summary'));
     let inFlight = false;
     // Cloudflare rewrites the HTML it proxies and drops the ETag header, so the
     // revision the server stamps into the markup is sent back as a query

@@ -43,6 +43,11 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
   const errorTitle = element();
   const errorRepo = element();
   const errorMessage = element();
+  const errorSummary = element();
+  const errorAction = element();
+  const errorTechnical = element();
+  const eventTechnical = element();
+  eventTechnical.open = false;
   const closeButton = element();
   const links = new Set();
   region.contains = candidate => links.has(candidate);
@@ -51,6 +56,9 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
     '#error-dialog-title': errorTitle,
     '#error-dialog-repo': errorRepo,
     '#error-dialog-message': errorMessage,
+    '#error-dialog-summary': errorSummary,
+    '#error-dialog-action': errorAction,
+    '#error-dialog-technical': errorTechnical,
     '[data-error-close]': closeButton,
   })[selector] || null;
   dialog.getBoundingClientRect = () => ({ left: 100, right: 740, top: 100, bottom: 500 });
@@ -76,7 +84,7 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
   region.dataset.refreshUrl = '/partials/repos?filter=';
   const revisionNode = element();
   revisionNode.dataset.revision = 'rev-1';
-  region.querySelector = () => revisionNode;
+  region.querySelector = selector => selector === 'details[open]' ? (eventTechnical.open ? eventTechnical : null) : revisionNode;
   // One stored timestamp, rendered by the server as a short UTC string.
   const timeStamp = element();
   timeStamp.setAttribute('datetime', '2026-10-15T03:55:19+00:00');
@@ -127,7 +135,7 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
       errorRepo: 'me/demo', errorStatus: '存在分叉', errorMessage: 'GitHub merge conflict', ...data,
     };
     link.isConnected = true;
-    link.matches = selector => selector === 'a[href]' || selector === 'a.error-details';
+    link.matches = selector => selector === 'a[href]' || selector === 'a.error-details' || selector === 'a[href], summary';
     link.closest = selector => link.matches(selector) ? link : null;
     link.focus = () => { document.activeElement = link; };
     links.add(link);
@@ -145,7 +153,8 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
   }, { filename: 'app/static/app.js' });
   return {
     form, button, themeButton, browser, root, region, fetches, timeStamp,
-    document, dialog, errorTitle, errorRepo, errorMessage, closeButton, errorLink, createErrorLink,
+    document, dialog, errorTitle, errorRepo, errorMessage, errorSummary, errorAction,
+    errorTechnical, eventTechnical, closeButton, errorLink, createErrorLink,
     clickError(link = errorLink, values = {}) {
       return document.dispatch('click', { button: 0, target: link, ...values });
     },
@@ -270,6 +279,37 @@ test('refresh pauses while details are open or the returned link retains focus',
   await current.tickAsync();
   assert.equal(current.fetches.length, 1);
   assert.equal(current.region.innerHTML, '<p>rows</p>');
+});
+
+test('known error guidance hides technical payload until requested and resets between errors', () => {
+  const current = page();
+  const known = current.createErrorLink({
+    errorSummary: 'GitHub 暂时无法找到要同步的提交',
+    errorAction: '约 10 分钟后自动再试', errorMessage: '<unsafe> raw 422',
+  });
+  current.clickError(known);
+  assert.equal(current.errorSummary.textContent, known.dataset.errorSummary);
+  assert.equal(current.errorAction.textContent, known.dataset.errorAction);
+  assert.equal(current.errorSummary.hidden, false);
+  assert.equal(current.errorTechnical.open, false);
+  assert.equal(current.dialog.getAttribute('aria-describedby'), 'error-dialog-repo error-dialog-summary error-dialog-action');
+  assert.equal(current.errorMessage.textContent, '<unsafe> raw 422');
+  current.closeError();
+  current.clickError();
+  assert.equal(current.errorSummary.hidden, true);
+  assert.equal(current.errorAction.hidden, true);
+  assert.equal(current.errorTechnical.open, true);
+  assert.equal(current.dialog.getAttribute('aria-describedby'), 'error-dialog-repo error-dialog-message');
+});
+
+test('expanded event technical details are not removed by background refresh', async () => {
+  const current = page();
+  current.eventTechnical.open = true;
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 0);
+  current.eventTechnical.open = false;
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 1);
 });
 
 test('an in-flight refresh cannot replace the list after details open', async () => {

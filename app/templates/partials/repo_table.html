@@ -16,7 +16,7 @@
     </div></td>
     <td data-label="版本对比">{{ verdict_chip(r.verdict) }}</td>
     <td data-label="状态">{{ status(r.status) }}
-        {% if r.last_error %}<a class="error-details" href="/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}">查看详情</a>{% endif %}</td>
+        {% if r.last_error %}{% set guidance = r.last_error | error_guidance %}<a class="error-details" href="/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}" data-error-summary="{{ guidance.summary if guidance else '' }}" data-error-action="{{ guidance.action if guidance else '' }}">查看详情</a>{% endif %}</td>
     <td class="muted" data-label="最近检查">{{ timestamp(r.last_check_at) }}</td>
   </tr>
   {% endfor %}

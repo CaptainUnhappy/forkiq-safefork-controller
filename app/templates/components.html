@@ -24,6 +24,11 @@
 {% if full_name %}<a href="https://github.com/{{ full_name }}" target="_blank" rel="noopener">{{ full_name }}</a>{% else %}—{% endif %}
 {%- endmacro %}
 
+{% macro error_message(message) -%}
+{%- set guidance = message | error_guidance -%}
+{% if guidance %}<div class="error-copy"><p class="error-summary">{{ guidance.summary }}</p><p class="error-action">{{ guidance.action }}</p><details class="technical-details"><summary>技术详情</summary><pre>{{ message }}</pre></details></div>{% else %}{{ message }}{% endif %}
+{%- endmacro %}
+
 {% macro github_link(full_name, label='在 GitHub 打开') -%}
 {% if full_name %}<a class="ext-link" href="https://github.com/{{ full_name }}" target="_blank" rel="noopener" aria-label="{{ label }} {{ full_name }}" title="{{ label }}">{{ icon('arrow-right') }}</a>{% endif %}
 {%- endmacro %}

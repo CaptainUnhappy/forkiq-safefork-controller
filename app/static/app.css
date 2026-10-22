@@ -164,7 +164,7 @@ tr:hover td { background: var(--surface); }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }
 .s-synced, .kind-synced, .kind-merge { background: var(--primary-soft); color: var(--green); }
 .s-behind, .s-pending, .kind-discover { background: var(--primary-soft); color: var(--primary); }
-.s-diverged, .s-blocked, .s-error, .s-needs_attention, .kind-blocked, .kind-error { background: var(--danger-soft); color: var(--red); }
+.s-diverged, .s-blocked, .s-error, .s-needs_attention, .s-missing, .kind-blocked, .kind-error { background: var(--danger-soft); color: var(--red); }
 .kind-auth { background: var(--warning-soft); color: var(--amber); }
 .tag { display: inline-block; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; font-size: 10px; font-weight: 400; white-space: nowrap; }
 .tag-warn { color: var(--amber); border-color: var(--amber); background: var(--warning-soft); }
@@ -177,6 +177,14 @@ tr:hover td { background: var(--surface); }
 .error { color: var(--red); background: var(--danger-soft); }
 .err-hint { color: var(--red); margin-top: 6px; font-size: 12px; max-width: 44ch; overflow-wrap: anywhere; }
 .error-details { display: table; margin-top: 4px; font-size: 12px; white-space: nowrap; }
+.field-help { margin: 8px 0 18px; max-width: 80ch; color: var(--muted); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.field-help p + p { margin-top: 8px; }
+.error-copy { max-width: 76ch; overflow-wrap: anywhere; }
+.error-summary { margin: 0 0 6px; color: var(--ink); font-weight: 500; }
+.error-action { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.technical-details { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.technical-details summary { width: fit-content; cursor: pointer; color: var(--primary); }
+.technical-details pre { margin: 10px 0 0; padding: 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.7 "SFMono-Regular", Consolas, monospace; }
 #error-dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; padding: 24px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: auto; }
 #error-dialog:not([open]) { display: none; }
 #error-dialog::backdrop { background: rgba(15, 28, 20, .45); }

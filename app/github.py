@@ -22,6 +22,10 @@ class RefNotFastForward(RuntimeError):
     pass
 
 
+class RefObjectNotFound(RuntimeError):
+    """The target commit object is not available for a ref update."""
+
+
 class RefNotFound(RuntimeError):
     """The requested ref (branch/tag) does not exist in the repository."""
 
@@ -146,7 +150,16 @@ class GitHub:
             {"Authorization": f"token {self.installation_token()}",
              "Accept": "application/vnd.github+json"}, {"sha": sha, "force": bool(force)})
         if status == 422:
-            raise RefNotFastForward(str(payload)[:300])
+            message = str((payload or {}).get("message", payload))
+            detail = f"update_ref {full_name}:{branch} -> 422: {message[:200]}"
+            if (payload or {}).get("errors"):
+                detail += f"; errors={json.dumps(payload['errors'], ensure_ascii=False)[:200]}"
+            normalized = message.lower().replace("-", " ").strip().rstrip(".")
+            if normalized == "object does not exist":
+                raise RefObjectNotFound(detail)
+            if "not a fast forward" in normalized:
+                raise RefNotFastForward(detail)
+            raise RuntimeError(detail)
         if status == 403:
             message = str((payload or {}).get("message", ""))
             if "rate limit" in message.lower():

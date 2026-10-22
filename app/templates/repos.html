@@ -19,22 +19,25 @@
         <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">暂停</a>
       </div>
     <section class="card">
-      <h2>添加 fork</h2>
+      <h2>手动加入已有 fork</h2>
+      <p class="field-help" id="fork-add-help">这里是加入面板管理，不会在 GitHub 创建 fork。{% if auto_discover %}自动发现已开启：新 fork 通常会在下一次 60 分钟扫描时自动加入，无需逐个填写。{% else %}自动发现已关闭：请手动加入，或在概览页点「发现新 fork」。{% endif %}粘贴链接可跳过等待，提交后立即安排首次检查同步。GitHub App 必须已获该仓库的访问权限。</p>
       {% if add_error %}<div class="error">{{ add_error }}</div>{% endif %}
       <form method="post" action="/repos/add" class="inline">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="sr-only" for="fork-url">GitHub fork 仓库链接</label>
-        <input id="fork-url" type="url" name="url" placeholder="https://github.com/owner/repository" required>
-        <button class="primary">加入自动同步</button>
+        <input id="fork-url" type="url" name="url" placeholder="https://github.com/owner/repository" required aria-describedby="fork-add-help">
+        <button class="primary">加入管理并同步</button>
       </form>
     </section>
     <section class="card">
       <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>
     </section>
-    <dialog id="error-dialog" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-repo error-dialog-message">
+    <dialog id="error-dialog" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-repo error-dialog-summary error-dialog-action">
       <button type="button" class="secondary" data-error-close autofocus>关闭</button>
       <h2 id="error-dialog-title">状态详情</h2>
       <p id="error-dialog-repo"></p>
-      <div id="error-dialog-message" tabindex="0"></div>
+      <p id="error-dialog-summary" class="error-summary" hidden></p>
+      <p id="error-dialog-action" class="error-action" hidden></p>
+      <details id="error-dialog-technical" class="technical-details"><summary>技术详情</summary><div id="error-dialog-message" tabindex="0"></div></details>
     </dialog>
 {% endblock %}

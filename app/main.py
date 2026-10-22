@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import time
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import DB, log_event, utcnow
+from .errors import error_guidance
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
 from .github import AuthError, exchange_manifest, write_pem
@@ -29,11 +31,12 @@ templates = Jinja2Templates(directory=BASE / "templates")
 # Stored timestamps are UTC ISO strings; the panel renders them short and the
 # browser re-renders them in the viewer's own timezone.
 templates.env.filters["short_time"] = short_time
+templates.env.filters["error_guidance"] = error_guidance
 
 STATUS_GROUPS = {
     "synced": ("synced",),
     "waiting": ("behind", "pending"),
-    "attention": ("blocked", "diverged", "needs_attention", "error"),
+    "attention": ("blocked", "diverged", "needs_attention", "error", "missing"),
     "paused": ("paused",),
 }
 
@@ -342,7 +345,8 @@ def _repo_rows(filter):
 
 def _repo_list_context(filter):
     revision = _repos_revision(filter)
-    return {"repos": annotate(_repo_rows(filter)), "filter": filter, "revision": revision}
+    return {"repos": annotate(_repo_rows(filter)), "filter": filter, "revision": revision,
+            "auto_discover": db.get_setting("auto_discover", "1") == "1"}
 
 
 def _repos_revision(filter):
@@ -556,7 +560,7 @@ def settings_page(request: Request):
     if guard:
         return guard
     return render(request, "settings.html",
-                  interval=db.get_setting("check_interval", "30"),
+                  interval_minutes=f'{int(db.get_setting("check_interval", "30")) / 60:g}',
                   auto_discover=db.get_setting("auto_discover", "1") == "1",
                   app_slug=db.get_setting("github_app_slug"),
                   installation_id=db.get_setting("github_installation_id"),
@@ -566,7 +570,7 @@ def settings_page(request: Request):
 
 @app.post("/settings", response_class=HTMLResponse)
 def settings_save(request: Request, csrf: str = Form(""),
-                  interval: str = Form("30"), auto_discover: str = Form("0")):
+                  interval_minutes: str = Form(...), auto_discover: str = Form("0")):
     guard = require_login(request)
     if guard:
         return guard
@@ -574,11 +578,15 @@ def settings_save(request: Request, csrf: str = Form(""),
     if denied:
         return denied
     try:
-        value = max(15, min(300, int(interval)))
+        minutes = float(interval_minutes)
+        if not math.isfinite(minutes):
+            raise ValueError
+        value = round(max(0.25, min(5, minutes)) * 60)
     except ValueError:
-        value = 30
+        return RedirectResponse("/settings?notice=检查间隔必须是有效的分钟数，设置未保存", status_code=302)
     db.set_setting("check_interval", value)
     db.set_setting("auto_discover", "1" if auto_discover == "1" else "0")
+    worker.request_sync()
     return RedirectResponse("/settings?notice=设置已保存", status_code=302)
 
 

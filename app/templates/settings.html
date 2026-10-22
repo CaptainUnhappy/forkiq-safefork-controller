@@ -10,11 +10,19 @@
     {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
     {% if auth_error %}<div class="notice warn">GitHub 认证异常：{{ auth_error }}</div>{% endif %}
     <section class="card">
-      <h2>同步</h2>
+      <h2>同步与新 fork 发现</h2>
       <form method="post" action="/settings">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>检查间隔（秒，15–300）<input type="number" name="interval" value="{{ interval }}" min="15" max="300"></label>
-        <label class="check"><input type="checkbox" name="auto_discover" value="1" {% if auto_discover %}checked{% endif %}> 自动发现新 fork（每小时）</label>
+        <label for="sync-interval">已受管仓库：上游更新检查间隔（分钟）</label>
+        <input id="sync-interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="0.25" max="5" step="any" required aria-describedby="sync-interval-help">
+        <p id="sync-interval-help" class="field-help">范围 0.25–5 分钟，1 表示每 1 分钟检查一次。每轮检查完成后等待此间隔，再检查所有已受管且未暂停的仓库；有上游更新就尝试同步，不受下方 60 分钟发现周期影响。</p>
+        <label class="check"><input type="checkbox" name="auto_discover" value="1" {% if auto_discover %}checked{% endif %} aria-describedby="discovery-help"> 自动发现新 fork（每 60 分钟扫描一次）</label>
+        <div id="discovery-help" class="field-help">
+          <p>在 GitHub 新 fork 的仓库，开启后会在下一次扫描时加入管理，随后在同一轮开始检查同步，无需再等 60 分钟。扫描在到期后的下一轮检查执行，并非固定整点。</p>
+          <p>只会发现 GitHub App 已获授权的仓库；若 App 使用「仅选定仓库」，需先在 GitHub 将新仓库加入授权范围。这里不会替你创建 GitHub fork。</p>
+          <p>不想等待，可点概览页的「发现新 fork」，或在仓库管理页粘贴已有 fork 链接；手动加入后立即安排首次检查。关闭自动发现不影响已受管仓库同步，仍可手动发现。</p>
+        </div>
+        <p class="field-help">检查间隔不是同步完成时限：排队、网络、GitHub 限流、权限或合并冲突都可能导致延后。普通仓库同步错误约 10 分钟后自动重试；权限与冲突需要按错误提示处理。</p>
         <button class="primary">保存</button>
       </form>
     </section>

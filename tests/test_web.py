@@ -192,9 +192,11 @@ class WebTests(unittest.TestCase):
         expected = [("/repos", set(ids), "受管仓库"),
                     ("/repos?filter=synced", {"synced"}, "已同步"),
                     ("/repos?filter=waiting", {"behind", "pending"}, "待同步"),
-                    ("/repos?filter=attention", {"blocked", "diverged", "needs_attention", "error"}, "需关注"),
+                    ("/repos?filter=attention", {"blocked", "diverged", "needs_attention", "error", "missing"}, "需关注"),
                     ("/repos?filter=paused", {"paused"}, "已暂停")]
         self.assertEqual(len(links), len(expected))
+        numbers = [int(page.inside(link, "span", **{"class": "num"})[0]["text"]) for link in links]
+        self.assertEqual(numbers[0], sum(numbers[1:]))
         for link, (href, states, label) in zip(links, expected):
             with self.subTest(href=href):
                 self.assertEqual(link["attrs"]["href"], href)
@@ -256,6 +258,45 @@ class WebTests(unittest.TestCase):
         partial = self.client.get("/partials/repos")
         self.assertIn("data-error-message=", partial.text)
         self.assertNotIn("<dialog", partial.text)
+
+    def test_known_errors_show_guidance_and_preserve_old_event_payloads(self):
+        self.setup_admin()
+        from app.db import insert_repository, log_event
+        repo_id = insert_repository(self.main.db, owner="me", name="broken",
+                                    full_name="me/broken", upstream_full_name="up/broken", status="error")
+        message = "me/broken 强制对齐失败：{'message': 'Object does not exist', 'status': '422', 'extra': '<unsafe>'}"
+        self.main.db.run("UPDATE repositories SET last_error=? WHERE id=?", (message, repo_id))
+        log_event(self.main.db, repo_id, "error", message)
+        for path in ("/", "/partials/overview", f"/repos/{repo_id}"):
+            with self.subTest(path=path):
+                response, page = self.rendered_page(path)
+                summaries = page.find("p", **{"class": "error-summary"})
+                self.assertTrue(summaries)
+                self.assertTrue(all("GitHub" in item["text"] for item in summaries))
+                self.assertTrue(page.find("details", **{"class": "technical-details"}))
+                for details in page.find("details", **{"class": "technical-details"}):
+                    self.assertNotIn("open", details["attrs"])
+                    self.assertEqual(page.inside(details, "pre")[0]["text"], message)
+                self.assertNotIn("<unsafe>", response.text)
+                self.assertIn("10 分钟", response.text)
+        _, listing = self.rendered_page("/repos")
+        link = listing.find("a", href=f"/repos/{repo_id}#repo-error")[0]
+        self.assertEqual(link["attrs"]["data-error-message"], message)
+        self.assertIn("GitHub", link["attrs"]["data-error-summary"])
+        self.assertIn("10 分钟", link["attrs"]["data-error-action"])
+        self.assertEqual(self.main.db.one("SELECT message FROM events WHERE repo_id=?", (repo_id,))["message"], message)
+
+    def test_manual_import_explains_automatic_discovery_and_github_authorization(self):
+        self.setup_admin()
+        for enabled in ("0", "1"):
+            self.main.db.set_setting("auto_discover", enabled)
+            response, page = self.rendered_page("/repos")
+            help_text = page.find("p", id="fork-add-help")[0]["text"]
+            self.assertIn("不会在 GitHub 创建 fork", help_text)
+            self.assertIn("首次检查同步", help_text)
+            self.assertIn("访问权限", help_text)
+            self.assertIn("60 分钟" if enabled == "1" else "自动发现已关闭", help_text)
+            self.assertTrue(page.find("input", **{"aria-describedby": "fork-add-help"}))
 
     def test_timestamps_render_short_and_keep_the_machine_readable_value(self):
         self.setup_admin()
@@ -584,8 +625,15 @@ class WebTests(unittest.TestCase):
         self.assertIn("Saved", response.text)
         self.assertIn("GitHub credentials expired", response.text)
         form = self.assert_post_form(page, "/settings", token)
-        interval = page.inside(form, "input", name="interval")[0]
-        self.assertEqual(interval["attrs"].get("value"), "90")
+        interval = page.inside(form, "input", name="interval_minutes")[0]
+        self.assertEqual(interval["attrs"].get("value"), "1.5")
+        self.assertEqual(interval["attrs"].get("min"), "0.25")
+        self.assertEqual(interval["attrs"].get("max"), "5")
+        self.assertTrue(page.find("p", id=interval["attrs"].get("aria-describedby")))
+        self.assertIn("已受管仓库", response.text)
+        self.assertIn("同一轮开始检查同步", response.text)
+        self.assertIn("仅选定仓库", response.text)
+        self.assertIn("检查间隔不是同步完成时限", response.text)
         auto_discover = page.inside(form, "input", name="auto_discover")[0]
         self.assertNotIn("checked", auto_discover["attrs"])
         password_form = self.assert_post_form(page, "/settings/password", token)
@@ -812,13 +860,41 @@ class WebTests(unittest.TestCase):
 
     def test_settings_save_clamps_interval(self):
         token = self.setup_admin()
-        self.client.post("/settings", data={"csrf": self.csrf(token), "interval": "5",
+        self.client.post("/settings", data={"csrf": self.csrf(token), "interval_minutes": "0.01",
                                             "auto_discover": "1"})
         self.assertEqual(self.main.db.get_setting("check_interval"), "15")
-        self.client.post("/settings", data={"csrf": self.csrf(token), "interval": "9999",
+        self.client.post("/settings", data={"csrf": self.csrf(token), "interval_minutes": "9999",
                                             "auto_discover": "0"})
         self.assertEqual(self.main.db.get_setting("check_interval"), "300")
         self.assertEqual(self.main.db.get_setting("auto_discover"), "0")
+
+    def test_minutes_round_trip_preserves_stored_seconds_and_wakes_worker(self):
+        token = self.setup_admin()
+        for minutes, seconds in (("0.25", "15"), ("0.5", "30"), ("1", "60"), ("1.5", "90"), ("5", "300")):
+            with self.subTest(minutes=minutes):
+                with mock.patch.object(self.main.worker, "request_sync") as wake:
+                    response = self.client.post("/settings", data={
+                        "csrf": self.csrf(token), "interval_minutes": minutes, "auto_discover": "1"})
+                self.assertEqual(response.status_code, 302)
+                wake.assert_called_once()
+                self.assertEqual(self.main.db.get_setting("check_interval"), seconds)
+                _, page = self.rendered_page("/settings")
+                self.assertEqual(page.find("input", name="interval_minutes")[0]["attrs"]["value"], minutes)
+
+    def test_invalid_minutes_leave_settings_unchanged(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("check_interval", "90")
+        self.main.db.set_setting("auto_discover", "1")
+        for invalid in ("nan", "inf", "-inf", "invalid", ""):
+            with self.subTest(invalid=invalid), mock.patch.object(self.main.worker, "request_sync") as wake:
+                response = self.client.post("/settings", data={
+                    "csrf": self.csrf(token), "interval_minutes": invalid, "auto_discover": "0"})
+                self.assertIn(response.status_code, (302, 422))
+                if response.status_code == 302:
+                    self.assertIn("notice=", response.headers["location"])
+                self.assertEqual(self.main.db.get_setting("check_interval"), "90")
+                self.assertEqual(self.main.db.get_setting("auto_discover"), "1")
+                wake.assert_not_called()
 
 
 if __name__ == "__main__":

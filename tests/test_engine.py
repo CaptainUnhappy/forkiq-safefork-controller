@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import engine
 from app.db import DB, insert_repository
-from app.github import RefNotFastForward, RefNotFound
+from app.github import RefNotFastForward, RefNotFound, RefObjectNotFound
 
 
 def node(node_id, fork_full, upstream_full, fork_sha, upstream_sha, branch="main",
@@ -69,7 +69,15 @@ class StubGitHub:
         if force:
             self.forced_refs.append((full_name, sha))
         if full_name in self.ref_error:
-            raise self.ref_error.pop(full_name)
+            error = self.ref_error[full_name]
+            if isinstance(error, list):
+                pending = error
+                error = pending.pop(0)
+                if not pending:
+                    del self.ref_error[full_name]
+            else:
+                del self.ref_error[full_name]
+            raise error
         self.refs[full_name] = sha
         return sha
 
@@ -248,6 +256,132 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.status(), "synced")
         self.assertEqual(self.client.refs["me/demo"], "b" * 40)
 
+    def test_missing_object_refreshes_upstream_once_and_verifies_new_target(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RefObjectNotFound("Object does not exist")
+        self.client.refs["up/demo"] = "c" * 40
+        engine.run_cycle(self.db, self.client)
+        row = self.row()
+        self.assertEqual(row["status"], "synced")
+        self.assertEqual((row["fork_sha"], row["upstream_sha"]), ("c" * 40, "c" * 40))
+        self.assertIsNone(row["last_error"])
+        self.assertEqual(self.client.forced_refs, [])
+        self.assertEqual([call for call in self.client.calls if call[0] == "update_ref"], [
+            ("update_ref", "me/demo", "main", "b" * 40),
+            ("update_ref", "me/demo", "main", "c" * 40)])
+        self.assertEqual([call for call in self.client.calls if call[0] == "get_ref"], [
+            ("get_ref", "up/demo"), ("get_ref", "me/demo")])
+        for field in ("fork_tag", "upstream_tag", "fork_commit_at", "upstream_commit_at"):
+            self.assertIsNone(row[field], field)
+        self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM events WHERE kind='error'")["n"], 0)
+
+    def test_missing_object_can_recover_without_upstream_moving(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RefObjectNotFound("Object does not exist")
+        self.client.refs["up/demo"] = "b" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.row()["upstream_sha"], "b" * 40)
+        self.assertEqual(self.row()["upstream_tag"], "v9.9.9")
+        self.assertEqual(self.client.forced_refs, [])
+
+    def test_missing_object_during_force_alignment_restarts_with_safe_update(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = [
+            RefNotFastForward("Update is not a fast forward"),
+            RefObjectNotFound("Object does not exist")]
+        self.client.refs["up/demo"] = "c" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.row()["fork_sha"], "c" * 40)
+        self.assertEqual(self.client.forced_refs, [("me/demo", "b" * 40)])
+
+    def test_refreshed_target_is_forced_only_after_explicit_non_fast_forward(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = [
+            RefObjectNotFound("Object does not exist"),
+            RefNotFastForward("Update is not a fast forward")]
+        self.client.refs["up/demo"] = "c" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.client.forced_refs, [("me/demo", "c" * 40)])
+        self.assertEqual(self.row()["fork_sha"], "c" * 40)
+
+    def test_persistent_missing_object_is_bounded_and_keeps_error_backoff(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        error = "update_ref me/demo:main -> 422: Object does not exist"
+        self.client.ref_error["me/demo"] = [RefObjectNotFound(error), RefObjectNotFound(error)]
+        self.client.refs["up/demo"] = "b" * 40
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertEqual(self.row()["last_error"], error)
+        self.assertEqual(self.client.forced_refs, [])
+        self.assertEqual(sum(call[0] == "update_ref" for call in self.client.calls), 2)
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(sum(call[0] == "update_ref" for call in self.client.calls), 2)
+        self.db.run("UPDATE repositories SET last_check_at='2020-01-01T00:00:00+00:00' WHERE id=?",
+                    (self.repo_id,))
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "synced")
+
+    def test_other_ref_validation_error_never_forces_or_refreshes(self):
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RuntimeError("update_ref me/demo:main -> 422: Validation failed")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertEqual(self.client.forced_refs, [])
+        self.assertFalse(any(call[0] == "get_ref" for call in self.client.calls))
+        self.assertEqual(sum(call[0] == "update_ref" for call in self.client.calls), 1)
+
+    def test_recovered_update_must_still_pass_readback_verification(self):
+        from unittest import mock
+
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = RefObjectNotFound("Object does not exist")
+        with mock.patch.object(self.client, "get_ref", side_effect=["c" * 40, "d" * 40]):
+            engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertIn("不一致", self.row()["last_error"])
+        self.assertIsNone(self.row()["last_success_at"])
+
+    def test_manual_mode_never_uses_mirror_missing_object_recovery(self):
+        self.db.run("UPDATE repositories SET mode='manual' WHERE id=?", (self.repo_id,))
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.compare_result = {"ahead_by": 1, "behind_by": 1}
+        self.client.merge_error["me/demo"] = RefObjectNotFound("Object does not exist")
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertFalse(any(call[0] in ("get_ref", "update_ref") for call in self.client.calls))
+        self.assertEqual(self.client.forced_refs, [])
+
+    def test_missing_object_recovery_does_not_escalate_workflow_permissions(self):
+        from app.github import Forbidden
+
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        self.client.ref_error["me/demo"] = [
+            RefObjectNotFound("Object does not exist"),
+            Forbidden("Resource not accessible by integration")]
+        self.client.refs["up/demo"] = "b" * 40
+        self.client.compare_result = {"ahead_by": 1, "behind_by": 0,
+                                      "files": [{"filename": ".github/workflows/ci.yml"}]}
+        engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.status(), "error")
+        self.assertIn("Workflows 权限", self.row()["last_error"])
+        self.assertEqual(self.client.forced_refs, [])
+        self.assertFalse(any(call[0].startswith("set_") for call in self.client.calls))
+
+    def test_missing_object_recovery_preserves_auth_and_rate_limit_boundaries(self):
+        from app.github import AuthError, RateLimited
+
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        for error in (AuthError("token expired"), RateLimited("rate limit exceeded")):
+            with self.subTest(error=type(error).__name__):
+                self.client.ref_error["me/demo"] = RefObjectNotFound("Object does not exist")
+                self.client.get_ref_error["up/demo"] = error
+                with self.assertRaises(type(error)):
+                    engine.run_cycle(self.db, self.client)
+        self.assertEqual(self.client.forced_refs, [])
+
     def test_same_commit_records_zero_counts(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
         engine.run_cycle(self.db, self.client)
@@ -407,10 +541,12 @@ class EngineTests(unittest.TestCase):
         self.assertNotEqual(row["status"], "missing")
         self.assertEqual(row["upstream_gone"], 1)
 
-    def test_discover_still_marks_really_deleted_fork_missing(self):
+    def test_discover_marks_inaccessible_fork_missing_without_claiming_deletion(self):
         self.client.installation = []
         engine.discover(self.db, self.client)
         self.assertEqual(self.status(), "missing")
+        self.assertIn("授权范围", self.row()["last_error"])
+        self.assertIn("可能已删除", self.row()["last_error"])
 
     def test_upstream_renamed_needs_attention(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "other/demo", "a" * 40, "b" * 40)
@@ -917,6 +1053,45 @@ class WorkerTickTests(unittest.TestCase):
         self.db.set_setting("github_pem_path", "/nonexistent.pem")
         self.db.set_setting("github_installation_id", "42")
         self.db.set_setting("auto_discover", "1")
+
+    def test_auto_discover_runs_before_sync_and_obeys_hourly_schedule(self):
+        from unittest import mock
+
+        order = []
+
+        def record_discover(db, client):
+            order.append("discover")
+            db.set_setting("last_discover_at", engine.utcnow())
+
+        worker = engine.Worker(self.tmp.name, "/nonexistent.pem")
+        with mock.patch.object(engine, "client_from_settings", return_value=object()), \
+             mock.patch.object(engine, "discover", side_effect=record_discover), \
+             mock.patch.object(engine, "run_cycle", side_effect=lambda db, client: order.append("sync")):
+            worker._tick(self.db)
+            self.assertEqual(order, ["discover", "sync"])
+            worker._tick(self.db)
+            self.assertEqual(order, ["discover", "sync", "sync"])
+            self.db.set_setting("last_discover_at", "2020-01-01T00:00:00+00:00")
+            worker._tick(self.db)
+            self.assertEqual(order, ["discover", "sync", "sync", "discover", "sync"])
+
+    def test_manual_discover_works_when_auto_discover_is_disabled(self):
+        from unittest import mock
+
+        self.db.set_setting("auto_discover", "0")
+        self.db.set_setting("discover_requested", "1")
+        self.db.set_setting("last_discover_at", engine.utcnow())
+        worker = engine.Worker(self.tmp.name, "/nonexistent.pem")
+        with mock.patch.object(engine, "client_from_settings", return_value=object()), \
+             mock.patch.object(engine, "discover") as discover, \
+             mock.patch.object(engine, "run_cycle") as run_cycle:
+            worker._tick(self.db)
+            discover.assert_called_once()
+            run_cycle.assert_called_once()
+            self.assertEqual(self.db.get_setting("discover_requested"), "0")
+            worker._tick(self.db)
+            discover.assert_called_once()
+            self.assertEqual(run_cycle.call_count, 2)
 
     def test_auth_error_sets_flag_and_is_throttled(self):
         from app.github import AuthError

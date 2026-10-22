@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .db import DB, log_event, insert_repository, utcnow
 from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConflict,
-                     RateLimited, RefNotFastForward, RefNotFound)
+                     RateLimited, RefNotFastForward, RefNotFound, RefObjectNotFound)
 
 BATCH = 50
 ERROR_RETRY_SECONDS = 600
@@ -215,10 +215,12 @@ def discover(db, client, *, manual=False):
     for full, row in known.items():
         present = present_by_name.get(full)
         if present is None:
-            # Truly gone from the installation: the fork itself no longer exists.
+            # The installation cannot see it; deletion and revoked access are
+            # indistinguishable here, so do not claim the repository was deleted.
             if row["status"] != "missing":
-                _set_repo(db, row["id"], status="missing", last_error="仓库已不在 GitHub 上")
-                log_event(db, row["id"], "blocked", f"{full} 在 GitHub 上已不存在")
+                message = "GitHub App 无法访问此仓库（可能已删除、转移或移出授权范围），请检查仓库和安装授权"
+                _set_repo(db, row["id"], status="missing", last_error=message)
+                log_event(db, row["id"], "blocked", f"{full} {message}")
             continue
         if not present.get("fork"):
             # The repository still exists but is no longer a fork: its upstream
@@ -648,6 +650,16 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
     return "error"
 
 
+def _update_mirror_ref(client, row, upstream_sha):
+    """Only a confirmed non-fast-forward permits the mirror's force update."""
+    try:
+        client.update_ref(row["full_name"], row["branch"], upstream_sha)
+        return False
+    except RefNotFastForward:
+        client.update_ref(row["full_name"], row["branch"], upstream_sha, force=True)
+        return True
+
+
 def sync_one(db, client, row, node, forced=False):
     """Apply one repository's observed state. Returns final status."""
     repo_id = row["id"]
@@ -767,43 +779,35 @@ def sync_one(db, client, row, node, forced=False):
                   last_check_at=now, last_success_at=now, last_error=None, **version)
         return "synced"
     try:
-        client.update_ref(row["full_name"], row["branch"], upstream_sha)
+        recovered_object = False
+        try:
+            force_aligned = _update_mirror_ref(client, row, upstream_sha)
+        except RefObjectNotFound:
+            # The batched observation may be stale; refresh once, without
+            # treating an unavailable object as permission to force a ref.
+            refreshed_sha = client.get_ref(row["upstream_full_name"], row["branch"])
+            if refreshed_sha != upstream_sha:
+                version = {"fork_tag": None, "upstream_tag": None,
+                           "fork_commit_at": None, "upstream_commit_at": None}
+            upstream_sha = refreshed_sha
+            force_aligned = _update_mirror_ref(client, row, upstream_sha)
+            recovered_object = True
         confirmed = client.get_ref(row["full_name"], row["branch"])
         if confirmed != upstream_sha:
             raise RuntimeError(f"推送后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
+        aligned_fields = {"diverged_at": None, "diverged_upstream_sha": None} if force_aligned else {}
         _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
                   upstream_ahead=0, fork_ahead=0,
-                  last_check_at=utcnow(), last_success_at=utcnow(), last_error=None, **version)
-        log_event(db, repo_id, "synced",
-                  f"{row['full_name']} 快进到 {upstream_sha[:12]}")
-        return "synced"
-    except RefNotFastForward:
-        # A mirror follows upstream exactly: the fork is not allowed to hold its
-        # own commits, so when upstream rewrote history (or the fork still
-        # carries older commits) the ref is moved onto upstream's head instead
-        # of freezing the repository in a diverged state.
-        try:
-            client.update_ref(row["full_name"], row["branch"], upstream_sha, force=True)
-            confirmed = client.get_ref(row["full_name"], row["branch"])
-            if confirmed != upstream_sha:
-                raise RuntimeError(f"强制对齐后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
-        except (RateLimited, AuthError):
-            raise
-        except Forbidden as error:
-            return _classify_forbidden(db, client, row, upstream_sha, error, version)
-        except Exception as error:
-            message = str(error)[:300]
-            if row["status"] != "error" or row["last_error"] != message:
-                log_event(db, repo_id, "error", f"{row['full_name']} 强制对齐失败：{message}")
-            _set_repo(db, repo_id, status="error", last_check_at=utcnow(),
-                      last_error=message, **version)
-            return "error"
-        _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
-                  upstream_ahead=0, fork_ahead=0, diverged_at=None,
-                  diverged_upstream_sha=None, last_check_at=utcnow(), last_success_at=utcnow(),
-                  last_error=None, **version)
-        log_event(db, repo_id, "synced",
-                  f"{row['full_name']} 已强制对齐到上游 {upstream_sha[:12]}（镜像模式，不保留 fork 自有提交）")
+                  last_check_at=utcnow(), last_success_at=utcnow(), last_error=None,
+                  **aligned_fields, **version)
+        if force_aligned:
+            message = (f"{row['full_name']} 已强制对齐到上游 {upstream_sha[:12]}"
+                       "（镜像模式，不保留 fork 自有提交）")
+        else:
+            message = f"{row['full_name']} 快进到 {upstream_sha[:12]}"
+        if recovered_object:
+            message += "（已刷新上游提交并自动恢复）"
+        log_event(db, repo_id, "synced", message)
         return "synced"
     except Forbidden as error:
         return _classify_forbidden(db, client, row, upstream_sha, error, version)
@@ -916,7 +920,7 @@ class Worker(threading.Thread):
             except ValueError:
                 due = True
         try:
-            if db.get_setting("auto_discover", "1") == "1" and (due or discover_requested):
+            if discover_requested or (db.get_setting("auto_discover", "1") == "1" and due):
                 discover(db, client)
             if discover_requested:
                 db.set_setting("discover_requested", "0")

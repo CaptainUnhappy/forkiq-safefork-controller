@@ -1,5 +1,5 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon, status, event_kind, repo_link, github_link, version_chip, verdict_chip, timestamp %}
+{% from "components.html" import icon, status, event_kind, repo_link, github_link, version_chip, verdict_chip, timestamp, error_message %}
 {% set active_page = "repos" %}
 {% set page_icon = "folder-git-2" %}
 {% block title %}ForkIQ · 仓库{% endblock %}
@@ -23,7 +23,7 @@
         <dt>fork 版本</dt><dd>{{ version_chip(repo.fork_sha, repo.fork_tag, repo.fork_commit_at, side='本地', tone=fork_tone) }}</dd>
         <dt>最近成功</dt><dd>{{ timestamp(repo.last_success_at) }}</dd>
         <dt>最近检查</dt><dd>{{ timestamp(repo.last_check_at) }}</dd>
-        {% if repo.last_error %}<dt>最近错误</dt><dd id="repo-error" class="err-hint">{{ repo.last_error }}</dd>{% endif %}
+        {% if repo.last_error %}<dt>最近错误</dt><dd id="repo-error" class="err-hint">{{ error_message(repo.last_error) }}</dd>{% endif %}
         {% if repo.diverged_at %}<dt>分叉于</dt><dd>{{ timestamp(repo.diverged_at) }}（上游 {{ repo.diverged_upstream_sha[:12] if repo.diverged_upstream_sha }}）</dd>{% endif %}
       </dl>
       <div class="actions">
@@ -61,7 +61,7 @@
       <div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events" data-columns="3">
         <tr><th>时间</th><th>类型</th><th>说明</th></tr>
         {% for e in events %}
-        <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ e.message }}</td></tr>
+        <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ error_message(e.message) if e.kind in ('error', 'blocked', 'auth') else e.message }}</td></tr>
         {% endfor %}
       </table></div>
       {% else %}<p class="muted">暂无事件。</p>{% endif %}
