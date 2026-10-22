@@ -570,7 +570,8 @@ def settings_page(request: Request):
 
 @app.post("/settings", response_class=HTMLResponse)
 def settings_save(request: Request, csrf: str = Form(""),
-                  interval_minutes: str = Form(...), auto_discover: str = Form("0")):
+                  interval_minutes: str = Form(""), interval: str = Form(""),
+                  auto_discover: str = Form("0")):
     guard = require_login(request)
     if guard:
         return guard
@@ -578,7 +579,9 @@ def settings_save(request: Request, csrf: str = Form(""),
     if denied:
         return denied
     try:
-        minutes = float(interval_minutes)
+        # Accept the pre-deploy form's seconds field so an already-open settings
+        # page cannot fail with a validation error during a rolling deploy.
+        minutes = float(interval_minutes) if interval_minutes else float(interval) / 60
         if not math.isfinite(minutes):
             raise ValueError
         value = round(max(0.25, min(5, minutes)) * 60)

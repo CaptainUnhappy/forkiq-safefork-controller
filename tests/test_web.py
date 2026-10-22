@@ -881,6 +881,15 @@ class WebTests(unittest.TestCase):
                 _, page = self.rendered_page("/settings")
                 self.assertEqual(page.find("input", name="interval_minutes")[0]["attrs"]["value"], minutes)
 
+    def test_predeploy_seconds_form_still_saves_during_rolling_deploy(self):
+        token = self.setup_admin()
+        with mock.patch.object(self.main.worker, "request_sync") as wake:
+            response = self.client.post("/settings", data={
+                "csrf": self.csrf(token), "interval": "90", "auto_discover": "1"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.main.db.get_setting("check_interval"), "90")
+        wake.assert_called_once()
+
     def test_invalid_minutes_leave_settings_unchanged(self):
         token = self.setup_admin()
         self.main.db.set_setting("check_interval", "90")
