@@ -5,7 +5,7 @@ import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -176,6 +176,131 @@ class WebTests(unittest.TestCase):
         self.assertIn("GitHub denied &lt;unsafe&gt;", response.text)
         self.assertNotIn("<unsafe>", response.text)
 
+    def test_repository_list_and_refreshed_rows_offer_csrf_protected_sync_controls(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        active_id = insert_repository(self.main.db, owner="me", name="active",
+                                      full_name="me/active", upstream_full_name="up/active")
+        paused_id = insert_repository(self.main.db, owner="me", name="paused",
+                                      full_name="me/paused", upstream_full_name="up/paused",
+                                      status="paused")
+        disabled_id = insert_repository(self.main.db, owner="me", name="disabled",
+                                        full_name="me/disabled", upstream_full_name="up/disabled")
+        self.main.db.run("UPDATE repositories SET enabled=0 WHERE id IN (?,?)",
+                         (paused_id, disabled_id))
+        for path in ("/repos", "/partials/repos"):
+            with self.subTest(path=path):
+                _, page = self.rendered_page(path)
+                self.assertTrue(page.find("th")[-1]["text"].strip())
+                for repo_id, name, action in ((active_id, "active", "pause"),
+                                              (paused_id, "paused", "resume"),
+                                              (disabled_id, "disabled", "resume")):
+                    form = self.assert_post_form(page, f"/repos/{repo_id}/{action}", token)
+                    self.assertEqual(page.inside(form, "input", name="return_filter")[0]["attrs"]["value"], "all")
+                    button = page.inside(form, "button")[0]
+                    self.assertIn(f"me/{name}", button["attrs"].get("aria-label", ""))
+                    self.assertIn("暂停" if action == "pause" else "恢复", button["text"])
+                    self.assertTrue(any(parent["tag"] == "td" for parent in form["parents"]))
+                    self.assertFalse(any("repo-pair" in parent["attrs"].get("class", "").split()
+                                         for parent in form["parents"]))
+                    self.assertFalse(page.find("form", action=f"/repos/{repo_id}/{'resume' if action == 'pause' else 'pause'}"))
+
+    def test_full_and_refreshed_pause_resume_forms_submit_with_the_current_filter(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo",
+                                    status="blocked")
+        for surface in ("/repos", "/partials/repos"):
+            self.main.db.run("UPDATE repositories SET status='blocked', enabled=1 WHERE id=?", (repo_id,))
+            for action, filter_name, expected_status, expected_enabled in (
+                    ("pause", "attention", "paused", 0), ("resume", "paused", "pending", 1),
+                    ("pause", "", "paused", 0), ("resume", "", "pending", 1)):
+                with self.subTest(surface=surface, action=action, filter=filter_name):
+                    _, page = self.rendered_page(f"{surface}?filter={filter_name}")
+                    form = self.assert_post_form(page, f"/repos/{repo_id}/{action}")
+                    fields = {field["attrs"]["name"]: field["attrs"]["value"]
+                              for field in page.inside(form, "input")}
+                    self.assertEqual(fields["return_filter"], filter_name or "all")
+                    response = self.client.post(form["attrs"]["action"], data=fields)
+                    self.assertEqual(response.status_code, 302)
+                    target = urlsplit(response.headers["location"])
+                    self.assertEqual(target.path, "/repos")
+                    self.assertEqual(parse_qs(target.query, keep_blank_values=True)["filter"], [filter_name])
+                    self.assertEqual(target.fragment, f"repo-{repo_id}")
+                    row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                    self.assertEqual((row["status"], row["enabled"]), (expected_status, expected_enabled))
+
+    def test_repository_action_returns_to_every_supported_list_filter(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        for filter_name in ("all", "synced", "waiting", "attention", "paused", "diverged", "blocked"):
+            for action in ("pause", "resume"):
+                with self.subTest(filter=filter_name, action=action):
+                    response = self.client.post(f"/repos/{repo_id}/{action}", data={
+                        "csrf": self.csrf(token), "return_filter": filter_name})
+                    self.assertEqual(response.status_code, 302)
+                    target = urlsplit(response.headers["location"])
+                    self.assertEqual((target.scheme, target.netloc, target.path), ("", "", "/repos"))
+                    query = parse_qs(target.query, keep_blank_values=True)
+                    self.assertEqual(query["filter"], ["" if filter_name == "all" else filter_name])
+                    self.assertIn("me/demo", query["notice"][0])
+                    self.assertIn("已暂停" if action == "pause" else "已恢复", query["notice"][0])
+                    self.assertEqual(target.fragment, f"repo-{repo_id}")
+                    result, page = self.rendered_page(response.headers["location"])
+                    self.assertTrue(page.find("div", role="status"))
+                    self.assertIn(query["notice"][0], result.text)
+
+    def test_repository_action_rejects_untrusted_return_destinations(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        for value in ("https://evil.example", "//evil.example", "\\\\evil.example",
+                      "/repos?filter=paused", "paused&notice=forged", "paused\r\nLocation: https://evil.example",
+                      "unknown", "<script>alert(1)</script>"):
+            with self.subTest(value=value):
+                response = self.client.post(f"/repos/{repo_id}/pause", data={
+                    "csrf": self.csrf(token), "return_filter": value,
+                    "return_to": "https://evil.example"})
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.headers["location"], f"/repos/{repo_id}")
+        for action in ("pause", "resume", "sync"):
+            with self.subTest(detail_action=action):
+                response = self.client.post(f"/repos/{repo_id}/{action}", data={"csrf": self.csrf(token)})
+                self.assertEqual(response.headers["location"], f"/repos/{repo_id}")
+        response = self.client.post(f"/repos/{repo_id}/sync", data={
+            "csrf": self.csrf(token), "return_filter": "paused"})
+        self.assertEqual(response.headers["location"], f"/repos/{repo_id}")
+
+    def test_list_sync_controls_require_login_csrf_and_existing_repository(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        for action in ("pause", "resume"):
+            for csrf in (None, "invalid"):
+                with self.subTest(action=action, csrf=csrf):
+                    data = {"return_filter": "paused"}
+                    if csrf is not None:
+                        data["csrf"] = csrf
+                    response = self.client.post(f"/repos/{repo_id}/{action}", data=data)
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+            response = self.client.post(f"/repos/{repo_id + 9999}/{action}", data={
+                "csrf": self.csrf(token), "return_filter": "paused"})
+            self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.main.db.all("SELECT * FROM events WHERE repo_id=?", (repo_id,)), [])
+        self.client.cookies.clear()
+        response = self.client.post(f"/repos/{repo_id}/pause", data={
+            "csrf": self.csrf(token), "return_filter": "paused"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/login")
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+
     def test_overview_links_match_grouped_repository_lists(self):
         self.setup_admin()
         from app.db import insert_repository
@@ -292,10 +417,13 @@ class WebTests(unittest.TestCase):
             self.main.db.set_setting("auto_discover", enabled)
             response, page = self.rendered_page("/repos")
             help_text = page.find("p", id="fork-add-help")[0]["text"]
-            self.assertIn("不会在 GitHub 创建 fork", help_text)
-            self.assertIn("首次检查同步", help_text)
-            self.assertIn("访问权限", help_text)
-            self.assertIn("60 分钟" if enabled == "1" else "自动发现已关闭", help_text)
+            self.assertIn("不会在 GitHub 创建仓库", help_text)
+            self.assertIn("加入后安排同步", help_text)
+            self.assertIn("已获 App 授权", help_text)
+            self.assertIn("自动发现已开启" if enabled == "1" else "自动发现已关闭", response.text)
+            if enabled == "1":
+                self.assertIn("60 分钟", response.text)
+            self.assertTrue(page.find("form", action="/discover"))
             self.assertTrue(page.find("input", **{"aria-describedby": "fork-add-help"}))
 
     def test_timestamps_render_short_and_keep_the_machine_readable_value(self):
@@ -574,6 +702,21 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.client.get("/partials/overview", params={"v": before}).status_code, 200)
         self.assertNotEqual(self.main._repos_revision("waiting"), self.main._repos_revision("attention"))
 
+    def test_enabled_change_invalidates_the_repository_controls_fragment(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        first = self.client.get("/partials/repos")
+        revision = first.headers["x-forkiq-revision"]
+        self.main.db.run("UPDATE repositories SET enabled=0 WHERE id=?", (repo_id,))
+        response = self.client.get("/partials/repos", params={"v": revision})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.headers["x-forkiq-revision"], revision)
+        page = RenderedHTML(response.text)
+        self.assert_post_form(page, f"/repos/{repo_id}/resume", token)
+        self.assertFalse(page.find("form", action=f"/repos/{repo_id}/pause"))
+
     def test_static_asset_cache_requires_the_current_content_hash(self):
         self.setup_admin()
         for name in ("app.css", "app.js"):
@@ -616,6 +759,44 @@ class WebTests(unittest.TestCase):
         remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
         self.assertTrue(remove_form["attrs"].get("data-confirm"))
 
+    def test_repository_detail_prioritizes_sync_and_groups_advanced_actions(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        for mode in ("manual", "mirror"):
+            self.main.db.run("UPDATE repositories SET mode=? WHERE id=?", (mode, repo_id))
+            _, page = self.rendered_page(f"/repos/{repo_id}")
+            toolbar = page.find("section", **{"aria-labelledby": "repo-sync-title"})[0]
+            advanced = page.find("details", **{"class": "advanced-actions"})[0]
+            self.assertNotIn("open", advanced["attrs"])
+            for action in ("sync", "pause"):
+                self.assertTrue(page.inside(toolbar, "form", action=f"/repos/{repo_id}/{action}"))
+            for action in ("mode", "selfupdate", "actions", "remove"):
+                self.assertTrue(page.inside(advanced, "form", action=f"/repos/{repo_id}/{action}"))
+            mode_form = self.assert_post_form(page, f"/repos/{repo_id}/mode", token)
+            if mode == "manual":
+                self.assertIn("不再保留 fork 自有提交", mode_form["attrs"].get("data-confirm", ""))
+            else:
+                self.assertNotIn("data-confirm", mode_form["attrs"])
+            remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
+            self.assertIn("自动发现", remove_form["attrs"]["data-confirm"])
+
+    def test_paused_detail_requires_resume_before_immediate_sync(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="paused",
+                                    full_name="me/paused", upstream_full_name="up/paused",
+                                    status="paused")
+        self.main.db.run("UPDATE repositories SET enabled=0 WHERE id=?", (repo_id,))
+        _, page = self.rendered_page(f"/repos/{repo_id}")
+        toolbar = page.find("section", **{"aria-labelledby": "repo-sync-title"})[0]
+        self.assertIn("GitHub Actions 不受影响", toolbar["text"])
+        resume = self.assert_post_form(page, f"/repos/{repo_id}/resume", token)
+        self.assertNotIn("disabled", page.inside(resume, "button")[0]["attrs"])
+        sync = self.assert_post_form(page, f"/repos/{repo_id}/sync", token)
+        self.assertIn("disabled", page.inside(sync, "button")[0]["attrs"])
+
     def test_settings_fields_keep_labels_values_and_notices(self):
         token = self.setup_admin()
         self.main.db.set_setting("check_interval", "90")
@@ -630,10 +811,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(interval["attrs"].get("min"), "0.25")
         self.assertEqual(interval["attrs"].get("max"), "5")
         self.assertTrue(page.find("p", id=interval["attrs"].get("aria-describedby")))
-        self.assertIn("已受管仓库", response.text)
-        self.assertIn("同一轮开始检查同步", response.text)
-        self.assertIn("仅选定仓库", response.text)
-        self.assertIn("检查间隔不是同步完成时限", response.text)
+        self.assertIn("已受管且未暂停", response.text)
+        self.assertIn("每 60 分钟", response.text)
+        explanations = page.find("details", **{"class": "settings-disclosure"})
+        self.assertTrue(any("同一轮" in detail["text"] and "仅选定仓库" in detail["text"]
+                            and "不是完成时限" in detail["text"] for detail in explanations))
         auto_discover = page.inside(form, "input", name="auto_discover")[0]
         self.assertNotIn("checked", auto_discover["attrs"])
         password_form = self.assert_post_form(page, "/settings/password", token)
@@ -642,6 +824,61 @@ class WebTests(unittest.TestCase):
         for field in fields:
             self.assertTrue(page.labels_for(field), field["attrs"].get("name"))
         self.assertNotIn(TEST_PASSWORD, response.text)
+
+    def test_settings_groups_connection_sync_and_security_with_a_real_workflow(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        self.main.db.set_setting("github_installation_id", "999")
+        _, page = self.rendered_page("/settings")
+        sections = [page.find("section", id=name)[0] for name in ("connection", "sync", "security")]
+        self.assertEqual([section["attrs"]["id"] for section in page.find("section")
+                          if section in sections], ["connection", "sync", "security"])
+        workflow = page.find("section", **{"aria-labelledby": "flow-title"})[0]
+        steps = page.inside(workflow, "li")
+        self.assertEqual(len(steps), 3)
+        self.assertEqual([page.inside(step, "a")[0]["attrs"]["href"] for step in steps],
+                         ["#connection", "/repos", "#sync"])
+        self.assertTrue(page.inside(workflow, "a", href="/repos"))
+        self.assertIn("暂停", workflow["text"])
+        sync_form = self.assert_post_form(page, "/settings", token)
+        password_form = self.assert_post_form(page, "/settings/password", token)
+        disconnect_form = self.assert_post_form(page, "/settings/disconnect", token)
+        for form, section in ((sync_form, sections[1]), (password_form, sections[2]),
+                              (disconnect_form, sections[0])):
+            self.assertTrue(any(parent is section for parent in form["parents"]))
+        self.assertTrue(any(parent["tag"] == "details" and "open" not in parent["attrs"]
+                            for parent in password_form["parents"]))
+        self.assertTrue(any(parent["tag"] == "details" and "open" not in parent["attrs"]
+                            for parent in disconnect_form["parents"]))
+        self.assertTrue(disconnect_form["attrs"].get("data-confirm"))
+        self.assertIn("重新登录", sections[2]["text"])
+        self.assertIn("不会卸载", sections[0]["text"])
+        self.assertTrue(page.inside(sections[0], "a", href="https://github.com/settings/installations/999"))
+        self.assert_post_form(page, "/github/detect", token)
+
+    def test_settings_connection_state_and_notices_remain_actionable(self):
+        token = self.setup_admin()
+        for slug, installation_id, label in (("", "", "未连接"),
+                                              ("forkiq-test", "", "待安装授权"),
+                                              ("forkiq-test", "999", "已连接")):
+            with self.subTest(slug=slug, installation_id=installation_id):
+                self.main.db.set_setting("github_app_slug", slug)
+                self.main.db.set_setting("github_installation_id", installation_id)
+                _, page = self.rendered_page("/settings")
+                section = page.find("section", id="connection")[0]
+                self.assertIn(label, section["text"])
+                if not installation_id:
+                    self.assertTrue(page.inside(section, "a", href="/github/connect"))
+                if not slug:
+                    self.assertFalse(page.find("form", action="/settings/disconnect"))
+        self.main.db.set_setting("auth_error", "Credentials <expired>")
+        response, page = self.rendered_page("/settings?notice=Saved")
+        self.assertIn("Saved", page.find("div", role="status")[0]["text"])
+        alert = page.find("div", role="alert")[0]
+        self.assertIn("Credentials <expired>", alert["text"])
+        self.assertTrue(page.inside(alert, "a", href="/github/connect"))
+        self.assertIn("Credentials &lt;expired&gt;", response.text)
+        self.assertNotIn("Credentials <expired>", response.text)
 
     def test_connection_and_installation_keep_manifest_and_detect_forms(self):
         token = self.setup_admin()
@@ -666,8 +903,53 @@ class WebTests(unittest.TestCase):
         self.assert_page_accessibility(installation_page)
         self.assertTrue(installation_page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
         self.assert_post_form(installation_page, "/github/detect", token)
-        _, connected = self.rendered_page("/github/connect")
-        self.assertTrue(connected.find("a", href="/"))
+        _, awaiting_installation = self.rendered_page("/github/connect")
+        self.assertTrue(awaiting_installation.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+        self.assert_post_form(awaiting_installation, "/github/detect", token)
+        self.assertFalse(awaiting_installation.find("form", id="manifest-form"))
+
+    def test_existing_app_connection_does_not_recreate_or_reset_manifest_state(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        self.main.db.set_setting("github_manifest_state", "existing-state")
+        for installation_id in ("", "999"):
+            with self.subTest(installation_id=installation_id):
+                self.main.db.set_setting("github_installation_id", installation_id)
+                with mock.patch.object(self.main, "manifest_payload", side_effect=AssertionError("recreated App")):
+                    response, page = self.rendered_page("/github/connect")
+                self.assertEqual(self.main.db.get_setting("github_manifest_state"), "existing-state")
+                self.assertFalse(page.find("form", id="manifest-form"))
+                if installation_id:
+                    self.assertIn("已连接", response.text)
+                    self.assertTrue(page.find("a", href="https://github.com/settings/installations/999"))
+                    self.assertFalse(page.find("form", action="/github/detect"))
+                    self.assertFalse(page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+                else:
+                    self.assertNotIn("已连接", response.text)
+                    self.assertTrue(page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+                    self.assert_post_form(page, "/github/detect", token)
+
+    def test_disconnect_keeps_existing_app_and_repository_configuration_reconnectable(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo",
+                                    full_name="me/demo", upstream_full_name="up/demo")
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        for key, value in (("github_app_id", "123"), ("github_app_slug", "forkiq-test"),
+                           ("github_pem_path", "existing-app.pem"), ("github_installation_id", "999"),
+                           ("auth_error", "expired")):
+            self.main.db.set_setting(key, value)
+        response = self.client.post("/settings/disconnect", data={"csrf": self.csrf(token)})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.main.db.get_setting("github_installation_id"), "")
+        self.assertEqual(self.main.db.get_setting("auth_error"), "")
+        self.assertEqual(self.main.db.get_setting("github_app_id"), "123")
+        self.assertEqual(self.main.db.get_setting("github_pem_path"), "existing-app.pem")
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+        _, page = self.rendered_page("/github/connect")
+        self.assertTrue(page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+        self.assert_post_form(page, "/github/detect", token)
+        self.assertFalse(page.find("form", id="manifest-form"))
 
     def test_empty_and_error_pages_remain_actionable(self):
         self.setup_admin()
@@ -683,6 +965,20 @@ class WebTests(unittest.TestCase):
         self.assertIn("仓库不在管理列表中", response.text)
         self.assert_page_accessibility(page)
         self.assertTrue(page.find("a", href="/"))
+
+    def test_connected_app_with_auth_error_offers_recovery_instead_of_success(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        self.main.db.set_setting("github_installation_id", "999")
+        self.main.db.set_setting("auth_error", "GitHub credentials expired <unsafe>")
+        response, page = self.rendered_page("/github/connect")
+        self.assertIn("连接异常", response.text)
+        self.assertNotIn("已连接：", response.text)
+        self.assertIn("GitHub credentials expired &lt;unsafe&gt;", response.text)
+        self.assertTrue(page.find("div", role="alert"))
+        self.assert_post_form(page, "/github/detect", token)
+        self.assertTrue(page.find("a", href="https://github.com/settings/installations/999"))
+        self.assertFalse(page.find("form", id="manifest-form"))
 
     def test_setup_requires_matching_passwords_and_min_length(self):
         response = self.client.post("/setup", data={"password": "short", "password2": "short"})

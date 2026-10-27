@@ -35,6 +35,8 @@ function element() {
 // Execute the production script with isolated browser primitives and no network.
 function page({ confirm = true, storageFails = false, dialogSupported = true, dialogPresent = true } = {}) {
   const form = element();
+  const forms = [form];
+  const fragmentForms = [];
   const button = element();
   const themeButton = element();
   const region = element();
@@ -108,15 +110,15 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
       }
       if (name === '#repo-table-region') return [region];
       if (name === 'time.ts[datetime]') return timeStamp.getAttribute('datetime') ? [timeStamp] : [];
-      if (name === 'form') return [form];
+      if (name === 'form') return forms;
       if (name === 'button[aria-busy]') return button.getAttribute('aria-busy') ? [button] : [];
       const field = /^form\[data-(editing|submitting)\]$/.exec(name);
-      if (field) return Object.hasOwn(form.dataset, field[1]) ? [form] : [];
+      if (field) return forms.filter(item => Object.hasOwn(item.dataset, field[1]));
       return [];
     });
   }
   // A refreshed fragment is re-scanned for timestamps in the viewer's timezone.
-  region.querySelectorAll = select;
+  region.querySelectorAll = selector => selector === 'form' ? fragmentForms : select(selector);
   const idleFocus = { matches() { return false; } };
   const document = {
     ...element(),
@@ -155,6 +157,12 @@ function page({ confirm = true, storageFails = false, dialogSupported = true, di
     form, button, themeButton, browser, root, region, fetches, timeStamp,
     document, dialog, errorTitle, errorRepo, errorMessage, errorSummary, errorAction,
     errorTechnical, eventTechnical, closeButton, errorLink, createErrorLink,
+    addFragmentForm() {
+      const added = element();
+      forms.push(added);
+      fragmentForms.push(added);
+      return added;
+    },
     clickError(link = errorLink, values = {}) {
       return document.dispatch('click', { button: 0, target: link, ...values });
     },
@@ -437,6 +445,32 @@ test('accepted POST is not interrupted by refresh after focus leaves the submitt
   await current.tickAsync();
   assert.equal(current.fetches.length, 0);
   assert.equal(current.reloads, 0);
+});
+
+test('forms inserted by refresh retain submit and input protection without duplicate binding', async () => {
+  const current = page();
+  const added = current.addFragmentForm();
+  await current.tickAsync();
+  current.setFetchResponse({ status: 200, ok: true, text: async () => '<p>changed rows</p>' });
+  await current.tickAsync();
+  added.dispatch('input');
+  assert.equal(added.dataset.editing, 'true');
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 2);
+  added.dispatch('reset');
+  assert.equal(Object.hasOwn(added.dataset, 'editing'), false);
+  added.dataset.confirm = 'Pause this repository?';
+  const button = element();
+  const event = added.dispatch('submit', { submitter: button });
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(current.confirmations, 1);
+  assert.equal(added.dataset.submitting, 'true');
+  assert.equal(button.disabled, false);
+  current.flushTimers();
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute('aria-busy'), 'true');
+  await current.tickAsync();
+  assert.equal(current.fetches.length, 2);
 });
 
 test('cancelled confirmation prevents submission and retains unsaved input', async () => {

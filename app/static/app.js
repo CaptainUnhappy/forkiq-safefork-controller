@@ -120,23 +120,29 @@
     });
   }
 
-  document.querySelectorAll('form').forEach(form => {
-    form.addEventListener('input', () => { form.dataset.editing = 'true'; });
-    form.addEventListener('submit', event => {
-      if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
-        event.preventDefault();
-        return;
-      }
-      const button = event.submitter;
-      if (button) {
-        // Preserve submitter values; disable only after native form data is captured.
-        setTimeout(() => { button.disabled = true; button.setAttribute('aria-busy', 'true'); }, 0);
-      }
-      form.dataset.submitting = 'true';
-      delete form.dataset.editing;
+  const boundForms = new WeakSet();
+  function bindForms(container) {
+    container.querySelectorAll('form').forEach(form => {
+      if (boundForms.has(form)) return;
+      boundForms.add(form);
+      form.addEventListener('input', () => { form.dataset.editing = 'true'; });
+      form.addEventListener('submit', event => {
+        if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
+          event.preventDefault();
+          return;
+        }
+        const button = event.submitter;
+        if (button) {
+          // Preserve submitter values; disable only after native form data is captured.
+          setTimeout(() => { button.disabled = true; button.setAttribute('aria-busy', 'true'); }, 0);
+        }
+        form.dataset.submitting = 'true';
+        delete form.dataset.editing;
+      });
+      form.addEventListener('reset', () => { delete form.dataset.editing; });
     });
-    form.addEventListener('reset', () => { delete form.dataset.editing; });
-  });
+  }
+  bindForms(document);
   // Background refresh replaces only the list region. A full reload re-fetched
   // the shell, CSS and JS every 30 seconds and made the panel feel sluggish, so
   // the server renders the same rows into a fragment that is swapped in place.
@@ -168,7 +174,11 @@
         // 204: nothing changed since the last tick, so the DOM stays untouched.
         if (response.status === 204 || !response.ok) return;
         const html = await response.text();
-        if (!busy() && region.innerHTML !== html) { region.innerHTML = html; localizeTimes(region); }
+        if (!busy() && region.innerHTML !== html) {
+          region.innerHTML = html;
+          localizeTimes(region);
+          bindForms(region);
+        }
       } catch { /* Keep the current view; the next tick retries. */ }
       finally { inFlight = false; }
     };

@@ -8,7 +8,8 @@
 {% block page_title %}仓库管理{% endblock %}
 {% block header_actions %}{% endblock %}
 {% block content %}
-    <div class="page-intro"><p class="muted">集中查看 fork 状态，管理上游同步。</p></div>
+    <div class="page-intro"><p class="muted">在仓库右侧暂停或恢复同步，不影响 GitHub Actions。</p></div>
+    {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
     <div class="filters">
         <a class="chip-link {% if not filter %}active{% endif %}" href="/repos">全部</a>
         <a class="chip-link {% if filter == 'synced' %}active{% endif %}" href="/repos?filter=synced">已同步</a>
@@ -16,19 +17,25 @@
         <a class="chip-link {% if filter == 'attention' %}active{% endif %}" href="/repos?filter=attention">需关注</a>
         <a class="chip-link {% if filter == 'diverged' %}active{% endif %}" href="/repos?filter=diverged">分叉</a>
         <a class="chip-link {% if filter == 'blocked' %}active{% endif %}" href="/repos?filter=blocked">阻塞</a>
-        <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">暂停</a>
+        <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">已暂停</a>
       </div>
-    <section class="card">
-      <h2>手动加入已有 fork</h2>
-      <p class="field-help" id="fork-add-help">这里是加入面板管理，不会在 GitHub 创建 fork。{% if auto_discover %}自动发现已开启：新 fork 通常会在下一次 60 分钟扫描时自动加入，无需逐个填写。{% else %}自动发现已关闭：请手动加入，或在概览页点「发现新 fork」。{% endif %}粘贴链接可跳过等待，提交后立即安排首次检查同步。GitHub App 必须已获该仓库的访问权限。</p>
+    <div class="repo-toolbar">
+    <details class="add-repo" {% if add_error %}open{% endif %}>
+      <summary>{{ icon('plus') }}加入已有 fork</summary>
+      <div class="add-repo-body">
+      <p class="field-help" id="fork-add-help">粘贴已获 App 授权的 fork 链接，加入后安排同步；不会在 GitHub 创建仓库。</p>
       {% if add_error %}<div class="error">{{ add_error }}</div>{% endif %}
       <form method="post" action="/repos/add" class="inline">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <label class="sr-only" for="fork-url">GitHub fork 仓库链接</label>
         <input id="fork-url" type="url" name="url" placeholder="https://github.com/owner/repository" required aria-describedby="fork-add-help">
-        <button class="primary">加入管理并同步</button>
+        <button class="primary">加入并同步</button>
       </form>
-    </section>
+      </div>
+    </details>
+    <form method="post" action="/discover"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon('refresh-cw') }}发现新 fork</button></form>
+    <span class="toolbar-help">自动发现{{ '已开启 · 每 60 分钟扫描' if auto_discover else '已关闭' }} · <a href="/settings#sync">设置</a></span>
+    </div>
     <section class="card">
       <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>
     </section>

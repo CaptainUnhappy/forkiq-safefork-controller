@@ -121,15 +121,16 @@ th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-alig
 tr:last-child td { border-bottom: 0; }
 tr:hover td { background: var(--surface); }
 .events { min-width: 640px; }
-.events td:first-child, .repos td:last-child { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
-/* Column widths are set so the five columns fit the panel without the last
+.events td:first-child, .repos td[data-label="最近检查"] { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Column widths are set so the six columns fit the panel without the last
    one sliding under the edge; the version lines wrap instead of widening. */
 .repos { min-width: 760px; table-layout: fixed; }
-.repos th:nth-child(1) { width: 28.5%; }
-.repos th:nth-child(2) { width: 28.5%; }
-.repos th:nth-child(3) { width: 17%; }
+.repos th:nth-child(1) { width: 24%; }
+.repos th:nth-child(2) { width: 24%; }
+.repos th:nth-child(3) { width: 15%; }
 .repos th:nth-child(4) { width: 12%; }
-.repos th:nth-child(5) { width: 14%; }
+.repos th:nth-child(5) { width: 13%; }
+.repos th:nth-child(6) { width: 12%; }
 /* 本地与上游合并成一个网格：两侧各占一列，名称 / 版本各占一行。
    行由两侧共享，两侧的版本行因此永远同层。子项顺序是网格的契约
    （列优先填充），不要插入额外子项。 */
@@ -201,6 +202,65 @@ tr:hover td { background: var(--surface); }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .actions form { display: inline-flex; }
 
+/* Frequent controls stay in view; setup and uncommon actions use disclosure. */
+.repo-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
+.add-repo > summary { display: flex; align-items: center; gap: 7px; width: fit-content; min-height: 38px; padding: 7px 13px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--card); font-size: 13px; cursor: pointer; list-style: none; }
+.add-repo > summary::-webkit-details-marker { display: none; }
+.add-repo > summary:hover { border-color: var(--primary); color: var(--primary); }
+.add-repo[open] { flex-basis: 100%; order: 3; }
+.add-repo[open] > summary .icon { transform: rotate(45deg); }
+.add-repo-body { margin-top: 12px; padding: 18px; background: var(--card); border-radius: var(--radius); }
+.add-repo-body .field-help { margin-top: 0; }
+.toolbar-help { margin-left: auto; font-size: 12px; color: var(--muted); }
+.list-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 12px; }
+.list-heading h2 { margin: 0; }
+.list-heading h2 span { margin-left: 6px; font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.repos .repo-controls { text-align: center; }
+.repo-controls button { gap: 4px; padding: 6px 8px; white-space: nowrap; }
+.repo-controls button .icon { width: 13px; height: 13px; }
+.content .repo-controls form:not(.inline) > button { margin: 0; }
+.repo-controls > a { display: inline-block; margin-top: 4px; padding: 2px 8px; font-size: 12px; }
+button.resume-button { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.repos tr[id] { scroll-margin-top: 84px; }
+.repo-sync-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px; }
+.repo-sync-bar h2 { display: flex; align-items: center; gap: 12px; margin-bottom: 5px; }
+.repo-sync-bar p { font-size: 13px; }
+.advanced-actions { padding-top: 18px; border-top: 1px solid var(--line); }
+.advanced-actions summary { cursor: pointer; font-weight: 500; }
+
+.sync-flow { margin: 0 0 28px; }
+.sync-flow h2 { font-size: 19px; margin-bottom: 18px; }
+.sync-flow ol { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0 0 18px; padding: 0; counter-reset: flow; list-style: none; }
+.sync-flow li { position: relative; padding-left: 34px; counter-increment: flow; }
+.sync-flow li::before { content: counter(flow); position: absolute; left: 0; top: 1px; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); background: var(--card); text-align: center; font-size: 12px; line-height: 22px; font-variant-numeric: tabular-nums; }
+.sync-flow li a { font-weight: 600; color: var(--ink); }
+.sync-flow li span { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.sync-flow > p { font-size: 12px; color: var(--muted); }
+.settings-sheet { background: var(--card); border-radius: var(--radius); overflow: hidden; }
+.settings-section { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; padding: 28px 32px; scroll-margin-top: 84px; }
+.settings-section + .settings-section { border-top: 1px solid var(--line); }
+.settings-heading h2 { margin-bottom: 6px; }
+.settings-heading p { color: var(--muted); font-size: 12px; max-width: 24ch; }
+.settings-body { min-width: 0; max-width: 650px; }
+.connection-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.connection-status strong { min-width: 0; font-size: 14px; font-weight: 500; }
+.settings-disclosure { margin-top: 18px; font-size: 13px; }
+.settings-disclosure > summary { width: fit-content; max-width: 100%; cursor: pointer; color: var(--muted); }
+.settings-disclosure > summary:hover { color: var(--primary); }
+.settings-disclosure .field-help { margin-bottom: 12px; }
+.settings-disclosure.disconnect { margin-top: 14px; font-size: 12px; }
+.setting-field + .setting-field { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.setting-field .field-help { margin: 8px 0 18px; font-size: 12px; }
+.input-unit { display: flex; align-items: center; gap: 10px; width: fit-content; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.input-unit input { max-width: 112px; font-variant-numeric: tabular-nums; }
+.discovery-field label.check { font-weight: 500; align-items: flex-start; }
+.discovery-field input { flex: none; margin: 3px 2px 0 0; }
+.password-disclosure { margin-top: 0; }
+.password-disclosure > summary { color: var(--ink); }
+.password-disclosure .icon { width: 17px; height: 17px; margin: 0 5px; }
+.password-form { margin-top: 20px; max-width: 400px; }
+.password-form > label { margin-bottom: 16px; }
+
 /* Keep forms native, labeled and comfortably usable on touch screens. */
 label { display: block; font-size: 13px; font-weight: 500; color: var(--ink); }
 input[type="password"], input[type="url"], input[type="number"], input[type="text"] { width: 100%; min-height: 42px; padding: 9px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; caret-color: var(--primary); transition: border-color .18s, background .18s; }
@@ -243,6 +303,7 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   :root { --sidebar-width: 190px; }
   .content { padding: 22px; }
   .topbar { padding-inline: 22px; }
+  .settings-section { grid-template-columns: 155px minmax(0, 1fr); gap: 24px; padding: 24px; }
 }
 @media (max-width: 760px) {
   :root { --header-height: 60px; }
@@ -286,8 +347,33 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   .auth-card { padding: 30px 24px; }
   .auth-brand { margin-bottom: 24px; }
   .icon-button { min-height: 40px; width: 40px; }
+  .toolbar-help { flex-basis: 100%; margin-left: 0; }
+  .repo-toolbar button, .add-repo > summary { min-height: 42px; }
+  .repo-sync-bar { align-items: flex-start; }
+  .repo-sync-bar .actions { width: 100%; }
+  .sync-flow ol { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .sync-flow h2 { font-size: 18px; }
+  .settings-section { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 24px 20px; }
+  .settings-heading p { max-width: none; }
+  .settings-body .actions { gap: 10px; }
+  .settings-body .actions button, .settings-body .link, .sync-settings-form > button { min-height: 42px; }
+  .settings-disclosure > summary { min-height: 42px; padding-block: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+
+/* Keep row actions visible on tablets instead of pushing them offscreen. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .repos, .repos tbody { display: block; min-width: 0; }
+  .repos tr:has(th) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .repos tr:has(td) { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+  .repos tr:last-child { border-bottom: 0; }
+  .repos td { display: block; min-width: 0; padding: 0; border: 0; overflow-wrap: anywhere; }
+  .repos td[colspan] { grid-column: 1 / -1; }
+  .repos td[data-label="最近检查"] { grid-column: 1; grid-row: 3; }
+  .repos td[data-label="最近检查"]::before { content: "最近检查："; }
+  .repos td.repo-controls { grid-column: 3; grid-row: 2 / 4; }
+  .repo-controls button { min-height: 42px; padding-inline: 12px; }
+}
 
 @media (max-width: 760px) {
   .repos, .events { display: block; min-width: 0; }
@@ -309,7 +395,10 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   /* Local and upstream version lines stay adjacent so the two SHAs read as a pair. */
   .repos td:nth-child(2) { grid-row: 2; grid-column: 1; }
   .repos td:nth-child(3) { grid-row: 2; grid-column: 2; }
-  .repos td:nth-child(4) { grid-row: 3; }
+  .repos td:nth-child(4) { grid-row: 3; grid-column: 1; align-self: center; }
+  .repos td.repo-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; grid-row: 3; grid-column: 2; }
+  .repo-controls button { min-height: 42px; padding-inline: 12px; }
+  .repo-controls > a { margin: 0; min-height: 42px; display: inline-flex; align-items: center; }
   .repos td[data-label] { font-size: 11px; white-space: normal; }
   .repos td[data-label]::before { content: attr(data-label) "："; }
   .repos .version-line { white-space: nowrap; }

@@ -3,9 +3,24 @@
 {% block auth_title %}连接 GitHub App{% endblock %}
 {% block auth_description %}<p class="auth-description">通过专用 App 授权，无需提供 GitHub 账号密码。</p>{% endblock %}
 {% block auth_content %}
-{% if app_slug %}
+{% if app_slug and installation_id %}
+  {% if auth_error %}
+  <div class="notice warn" role="alert"><strong>{{ app_slug }} · 连接异常</strong><br>{{ auth_error }}</div>
+  <p class="field-help">先在 GitHub 检查 App 安装与仓库授权，再返回检测。</p>
+  <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary auth-submit">重新检测连接{{ icon('refresh-cw') }}</button></form>
+  {% else %}
   <div class="notice"><strong>已连接：{{ app_slug }}</strong>{% if installation_id %}<br>installation {{ installation_id }}{% endif %}</div>
   <a class="primary link auth-submit" href="/">进入面板{{ icon('arrow-right') }}</a>
+  {% endif %}
+  <a class="secondary link auth-submit" href="https://github.com/settings/installations/{{ installation_id }}" target="_blank" rel="noopener">管理仓库授权</a>
+{% elif app_slug %}
+  <div class="notice warn"><strong>{{ app_slug }} · 待安装授权</strong><br>已有 App，无需重新创建。</div>
+  <p class="field-help">打开 GitHub 安装页，选择要授权的仓库；完成后返回检测。选择 All repositories 可自动发现后续新 fork。</p>
+  <a class="secondary link auth-submit" href="https://github.com/apps/{{ app_slug }}/installations/new" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
+  <form method="post" action="/github/detect">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="primary auth-submit">已授权，检测连接{{ icon('refresh-cw') }}</button>
+  </form>
 {% else %}
   <ol class="connect-steps">
     <li>在 GitHub 创建专用 App，权限已预填。</li>

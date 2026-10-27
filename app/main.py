@@ -7,6 +7,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -238,11 +239,13 @@ def github_connect(request: Request):
     guard = require_login(request)
     if guard:
         return guard
-    state, payload = manifest_payload()
+    app_slug = db.get_setting("github_app_slug")
+    state, payload = ("", {}) if app_slug else manifest_payload()
     return render(request, "connect.html", manifest=json.dumps(payload, ensure_ascii=False),
                   manifest_url=MANIFEST_URL, state=state,
-                  app_slug=db.get_setting("github_app_slug"),
-                  installation_id=db.get_setting("github_installation_id"))
+                  app_slug=app_slug,
+                  installation_id=db.get_setting("github_installation_id"),
+                  auth_error=db.get_setting("auth_error", ""))
 
 
 @app.get("/api/github/callback", response_class=HTMLResponse)
@@ -327,7 +330,8 @@ def repo_list(request: Request, filter: str = ""):
     guard = require_login(request)
     if guard:
         return guard
-    return render(request, "repos.html", **_repo_list_context(filter))
+    return render(request, "repos.html", **_repo_list_context(filter),
+                  notice=request.query_params.get("notice", ""))
 
 
 def _repo_filter(filter):
@@ -354,7 +358,7 @@ def _repos_revision(filter):
     # MAX timestamps miss changes to a different row in the same second. Hash the
     # displayed fields instead, without building version labels or fetching events.
     return _revision(
-        "SELECT id, full_name, upstream_full_name, status, last_error, last_check_at, "
+        "SELECT id, full_name, upstream_full_name, status, enabled, last_error, last_check_at, "
         "fork_sha, upstream_sha, fork_tag, upstream_tag, fork_commit_at, upstream_commit_at, "
         "upstream_gone, last_merged_upstream_sha, upstream_ahead, fork_ahead "
         "FROM repositories" + where + " ORDER BY id", params)
@@ -387,7 +391,8 @@ def partial_repos(request: Request, filter: str = ""):
     revision = _repos_revision(filter)
     return _fragment(request, "partials/repo_table.html",
                      lambda: {"repos": annotate(_repo_rows(filter)), "filter": filter,
-                              "revision": revision}, revision)
+                              "revision": revision,
+                              "csrf": csrf_for(request.cookies["forkiq_session"])}, revision)
 
 
 @app.get("/partials/overview", response_class=HTMLResponse)
@@ -414,7 +419,7 @@ def repo_detail(request: Request, repo_id: int):
                   verdict=verdict, fork_tone=fork_tone(verdict))
 
 
-def _repo_action(request, repo_id, csrf, action):
+def _repo_action(request, repo_id, csrf, action, return_filter=None):
     guard = require_login(request)
     if guard:
         return guard
@@ -485,14 +490,20 @@ def _repo_action(request, repo_id, csrf, action):
     elif action == "remove":
         db.run("DELETE FROM repositories WHERE id=?", (repo_id,))
         log_event(db, None, "check", f"{repo['full_name']} 已移出管理（GitHub 仓库未改动）")
+    if action in ("pause", "resume") and return_filter in ("all", *STATUS_GROUPS, "diverged", "blocked"):
+        label = "已暂停同步" if action == "pause" else "已恢复同步，等待检查"
+        query = urlencode({"filter": "" if return_filter == "all" else return_filter,
+                           "notice": f"{repo['full_name']} {label}"})
+        return RedirectResponse(f"/repos?{query}#repo-{repo_id}", status_code=302)
     return RedirectResponse(f"/repos/{repo_id}" if action != "remove" else "/repos", status_code=302)
 
 
 @app.post("/repos/{repo_id}/{action}")
-def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form("")):
+def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""),
+                return_filter: str | None = Form(None)):
     if action not in ("pause", "resume", "sync", "remove", "mode", "selfupdate"):
         return JSONResponse({"error": "不支持的操作"}, status_code=400)
-    return _repo_action(request, repo_id, csrf, action)
+    return _repo_action(request, repo_id, csrf, action, return_filter)
 
 
 @app.post("/repos/{repo_id}/actions")
