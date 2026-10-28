@@ -22,6 +22,17 @@ export FORKIQ_PEM_PATH=&quot;$FORKIQ_STATE_DIR/app.pem&quot;
 <p><code>deploy/bootstrap.sh</code> 在干净的 Linux 主机上创建 <code>forkiq</code> 服务账号与目录，<code>deploy/forkiq.service</code> 是 systemd 单元（只监听 <code>127.0.0.1:8792</code>，由同机 HTTPS 反向代理访问）。把代码放到 <code>/opt/forkiq</code>、装好依赖后：</p>
 <pre><code>systemctl daemon-reload &amp;&amp; systemctl enable --now forkiq</code></pre>
 <p>面板不做 TLS，请在反向代理终止 HTTPS 并传下 <code>X-Forwarded-Proto</code>，否则登录 Cookie 不会带 <code>Secure</code>。</p>
+<h2>版本与发布包</h2>
+<p><a href="https://github.com/zzusec/forkiq/releases">GitHub Releases</a> 提供每个正式版本的部署包：</p>
+<ul><li><code>forkiq-vX.Y.Z.tar.gz</code> / <code>forkiq-vX.Y.Z.zip</code>：同一份代码，包含应用、依赖清单、部署示例、测试与文档；安装时仍需创建 Python 虚拟环境并安装依赖。</li><li><code>SHA256SUMS</code>：两个部署包的 SHA-256 校验值；包内 <code>release.json</code> 记录版本、提交与逐文件校验值。</li><li>只打包 Git 已提交的代码，不含数据库、GitHub App 私钥、虚拟环境或本地配置。升级时保留 <code>/var/lib/forkiq</code>、现有虚拟环境与实际 systemd/nginx 配置；不要重跑初始化脚本。</li></ul>
+<p>发布一个版本时，先推送代码，再推送对应标签：</p>
+<pre><code>git push origin main
+git tag -a v1.0.0 -m "ForkIQ v1.0.0"   # 后续版本使用新的标签，例如 v1.0.1
+git push origin v1.0.0</code></pre>
+<p>GitHub Actions 会先运行 Python 与 JavaScript 回归测试，通过后自动打包并创建 Release。普通代码推送不创建 Release；<code>v1.1.0-rc.1</code> 这类标签会标为预发布。已发布版本不应移动标签或覆盖文件，修复请发布新版本。</p>
+<p>也可在 Git 仓库中打包指定提交（需 Git 与 Python 3.10+），输出位于 <code>dist/</code>：</p>
+<pre><code>python3 deploy/package.py v1.0.0 --ref v1.0.0
+cd dist &amp;&amp; shasum -a 256 -c SHA256SUMS</code></pre>
 <h2>测试</h2>
 <pre><code>.venv/bin/python -m unittest discover -s tests -p &#x27;test_*.py&#x27;   # 引擎与 Web 层
 node --test tests/test_ui.js                                    # 前端脚本</code></pre>

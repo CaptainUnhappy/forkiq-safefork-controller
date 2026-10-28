@@ -51,6 +51,31 @@ systemctl daemon-reload && systemctl enable --now forkiq
 
 面板不做 TLS，请在反向代理终止 HTTPS 并传下 `X-Forwarded-Proto`，否则登录 Cookie 不会带 `Secure`。
 
+## 版本与发布包
+
+[GitHub Releases](https://github.com/zzusec/forkiq/releases) 提供每个正式版本的部署包：
+
+- `forkiq-vX.Y.Z.tar.gz` / `forkiq-vX.Y.Z.zip`：同一份代码，包含应用、依赖清单、部署示例、测试与文档；安装时仍需创建 Python 虚拟环境并安装依赖。
+- `SHA256SUMS`：两个部署包的 SHA-256 校验值；包内 `release.json` 记录版本、提交与逐文件校验值。
+- 只打包 Git 已提交的代码，不含数据库、GitHub App 私钥、虚拟环境或本地配置。升级时保留 `/var/lib/forkiq`、现有虚拟环境与实际 systemd/nginx 配置；不要重跑初始化脚本。
+
+发布一个版本时，先推送代码，再推送对应标签：
+
+```sh
+git push origin main
+git tag -a v1.0.0 -m "ForkIQ v1.0.0"   # 后续版本使用新的标签，例如 v1.0.1
+git push origin v1.0.0
+```
+
+GitHub Actions 会先运行 Python 与 JavaScript 回归测试，通过后自动打包并创建 Release。普通代码推送不创建 Release；`v1.1.0-rc.1` 这类标签会标为预发布。已发布版本不应移动标签或覆盖文件，修复请发布新版本。
+
+也可在 Git 仓库中打包指定提交（需 Git 与 Python 3.10+），输出位于 `dist/`：
+
+```sh
+python3 deploy/package.py v1.0.0 --ref v1.0.0
+cd dist && shasum -a 256 -c SHA256SUMS
+```
+
 ## 测试
 
 ```sh
