@@ -541,9 +541,12 @@ test('stored timestamps are rewritten in the viewer timezone', async () => {
 
 test('a refreshed fragment has its timestamps rewritten too', async () => {
   const current = page();
-  current.timeStamp.textContent = '10-15 03:55';
+  const expectedText = current.timeStamp.textContent;
+  const expectedTitle = current.timeStamp.title;
+  current.timeStamp.textContent = 'stale timestamp';
+  current.timeStamp.title = 'stale title';
   current.setFetchResponse({ status: 200, ok: true, text: async () => '<p>rows</p>' });
   await current.tickAsync();
-  assert.match(current.timeStamp.textContent, /^\d\d-\d\d \d\d:\d\d$/);
-  assert.notEqual(current.timeStamp.textContent, '10-15 03:55');
+  assert.equal(current.timeStamp.textContent, expectedText);
+  assert.equal(current.timeStamp.title, expectedTitle);
 });

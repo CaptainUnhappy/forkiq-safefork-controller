@@ -36,7 +36,8 @@ jobs:
       - name: Run regression tests
         run: |
           python -m unittest discover -s tests -p 'test_*.py'
-          node --test tests/test_ui.js
+          TZ=UTC node --test tests/test_ui.js
+          TZ=Asia/Shanghai node --test tests/test_ui.js
       - name: Build deployment packages
         run: python deploy/package.py "$RELEASE_TAG"
       - name: Verify package checksums
