@@ -13,6 +13,7 @@ if getent passwd forkiq >/dev/null; then
     exit 1
 fi
 command -v python3 >/dev/null
+command -v git >/dev/null
 command -v systemctl >/dev/null
 
 useradd --system --user-group --home-dir /var/lib/forkiq --shell /usr/sbin/nologin forkiq

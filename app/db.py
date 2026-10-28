@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS repositories(
   deletion_max_percent REAL,
   deletion_review TEXT,
   deletion_approval TEXT,
+  restore_backup_id INTEGER,
+  restore_expected_sha TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -57,6 +59,19 @@ CREATE TABLE IF NOT EXISTS sessions(
   token TEXT PRIMARY KEY,
   created_at REAL NOT NULL,
   expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS repository_backups(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_id INTEGER,
+  full_name TEXT NOT NULL,
+  fork_sha TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  sha256 TEXT,
+  size_bytes INTEGER,
+  last_error TEXT,
+  UNIQUE(full_name,fork_sha)
 );
 """
 
@@ -125,6 +140,9 @@ class DB:
                            ("deletion_max_files", "INTEGER"),
                            ("deletion_max_percent", "REAL"),
                            ("deletion_review", "TEXT"), ("deletion_approval", "TEXT")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE repositories ADD COLUMN {name} {kind}")
+        for name, kind in (("restore_backup_id", "INTEGER"), ("restore_expected_sha", "TEXT")):
             if name not in columns:
                 conn.execute(f"ALTER TABLE repositories ADD COLUMN {name} {kind}")
         conn.commit()

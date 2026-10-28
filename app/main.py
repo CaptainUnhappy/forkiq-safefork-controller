@@ -11,11 +11,12 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import DB, log_event, utcnow
+from .backups import backup_path, verified_backup
 from .errors import error_guidance
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
@@ -460,7 +461,16 @@ def repo_detail(request: Request, repo_id: int):
     verdict = version_verdict(repo)
     policy = deletion_policy(db, repo)
     review = load_review(repo)
+    backups = db.all("SELECT * FROM repository_backups WHERE full_name=? AND status='ready' "
+                     "ORDER BY created_at DESC, id DESC LIMIT 3", (repo["full_name"],))
+    backup_error = db.one("SELECT * FROM repository_backups WHERE full_name=? "
+                          "ORDER BY updated_at DESC, id DESC LIMIT 1", (repo["full_name"],))
+    if backup_error and backup_error["status"] != "error":
+        backup_error = None
+    baseline = next((item for item in backups if item["fork_sha"] == repo["fork_sha"]), None)
+    baseline_ready = bool(baseline and verified_backup(db, baseline))
     can_confirm = bool(review and review.get("reasons") and not review.get("error")
+                       and baseline_ready
                        and repo["enabled"] and repo["status"] == "needs_attention"
                        and review.get("policy") == policy
                        and review.get("identity") == {
@@ -471,7 +481,82 @@ def repo_detail(request: Request, repo_id: int):
                   verdict=verdict, fork_tone=fork_tone(verdict), protection=policy,
                   deletion_review=review, can_confirm_deletion=can_confirm,
                   deletion_token=review_token(review) if can_confirm else "",
+                  backups=backups, backup_error=backup_error, baseline_ready=baseline_ready,
                   notice=request.query_params.get("notice", ""))
+
+
+@app.get("/backups/{backup_id}/download")
+def download_backup(request: Request, backup_id: int):
+    guard = require_login(request)
+    if guard:
+        return guard
+    record = db.one("SELECT * FROM repository_backups WHERE id=?", (backup_id,))
+    if not record:
+        return JSONResponse({"error": "备份不存在"}, status_code=404)
+    if not verified_backup(db, record):
+        return JSONResponse({"error": "备份缺失或校验失败，不能下载"}, status_code=409)
+    return FileResponse(backup_path(db, record), media_type="application/octet-stream",
+                        filename=f"{record['full_name'].replace('/', '-')}-{record['fork_sha'][:12]}.bundle",
+                        headers={"Cache-Control": "no-store"})
+
+
+def _restore_record(repo_id, backup_id):
+    repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+    record = db.one("SELECT * FROM repository_backups WHERE id=?", (backup_id,))
+    if not repo or not record or record["full_name"] != repo["full_name"]:
+        return None, None
+    return repo, record
+
+
+@app.get("/repos/{repo_id}/backups/{backup_id}/restore", response_class=HTMLResponse)
+def restore_preview(request: Request, repo_id: int, backup_id: int):
+    guard = require_login(request)
+    if guard:
+        return guard
+    repo, record = _restore_record(repo_id, backup_id)
+    if repo is None:
+        return JSONResponse({"error": "仓库备份不存在"}, status_code=404)
+    if not verified_backup(db, record) or repo["restore_backup_id"] is not None:
+        return JSONResponse({"error": "备份不可用或已有回滚正在处理"}, status_code=409)
+    client = client_from_settings(db)
+    if client is None:
+        return JSONResponse({"error": "请先连接 GitHub"}, status_code=409)
+    try:
+        expected = client.get_ref(repo["full_name"], repo["branch"])
+        if not re.fullmatch(r"[a-f0-9]{40}", expected or ""):
+            raise ValueError("无效的分支提交")
+    except Exception:
+        return JSONResponse({"error": "无法核实 GitHub 当前分支，请检查连接后重试"}, status_code=409)
+    return render(request, "restore.html", repo=repo, backup=record, expected_sha=expected)
+
+
+@app.post("/repos/{repo_id}/backups/{backup_id}/restore")
+def restore_request(request: Request, repo_id: int, backup_id: int,
+                    csrf: str = Form(""), expected_sha: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    repo, record = _restore_record(repo_id, backup_id)
+    if repo is None:
+        return JSONResponse({"error": "仓库备份不存在"}, status_code=404)
+    if not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
+        return JSONResponse({"error": "当前提交无效，请重新打开确认页"}, status_code=400)
+    if not verified_backup(db, record) or repo["restore_backup_id"] is not None:
+        return JSONResponse({"error": "备份不可用、确认已失效或已有回滚正在处理"}, status_code=409)
+    if client_from_settings(db) is None:
+        return JSONResponse({"error": "请先连接 GitHub"}, status_code=409)
+    changed = db.run("UPDATE repositories SET enabled=0, status='paused', sync_requested=0, "
+                     "deletion_approval=NULL, restore_backup_id=?, restore_expected_sha=?, "
+                     "last_error=?, updated_at=? WHERE id=? AND restore_backup_id IS NULL",
+                     (backup_id, expected_sha, "回滚已排队，保持暂停；请等待事件结果。", utcnow(), repo_id)).rowcount
+    if not changed:
+        return JSONResponse({"error": "已有回滚正在处理"}, status_code=409)
+    log_event(db, repo_id, "check", f"{repo['full_name']} 已请求回滚到 {record['fork_sha']}，同步已暂停")
+    worker.request_sync()
+    return RedirectResponse(f"/repos/{repo_id}?notice=回滚已排队，同步已暂停；请稍后刷新查看结果", status_code=302)
 
 
 def _repo_action(request, repo_id, csrf, action, return_filter=None):
@@ -484,6 +569,8 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
     repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
     if not repo:
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    if repo["restore_backup_id"] is not None:
+        return JSONResponse({"error": "回滚正在处理，请等待完成后再操作"}, status_code=409)
     if action == "pause":
         db.run("UPDATE repositories SET status='paused', enabled=0, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
@@ -564,8 +651,11 @@ def repo_protection(request: Request, repo_id: int, csrf: str = Form(""),
     denied = check_csrf(request, csrf)
     if denied:
         return denied
-    if not db.one("SELECT id FROM repositories WHERE id=?", (repo_id,)):
+    repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+    if not repo:
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    if repo["restore_backup_id"] is not None:
+        return JSONResponse({"error": "回滚正在处理，请等待完成后再操作"}, status_code=409)
     try:
         if protection_mode not in ("inherit", "on", "off"):
             raise ValueError("请选择有效的保护开关")
@@ -603,6 +693,10 @@ def confirm_deletion(request: Request, repo_id: int, csrf: str = Form(""),
             or not re.fullmatch(r"[a-f0-9]{64}", review)
             or not hmac.compare_digest(review_token(snapshot), review)):
         return JSONResponse({"error": "检测结果已变化、未完成或仓库已暂停，请重新检查后确认"}, status_code=409)
+    baseline = db.one("SELECT * FROM repository_backups WHERE full_name=? AND fork_sha=? AND status='ready'",
+                      (repo["full_name"], repo["fork_sha"]))
+    if not baseline or not verified_backup(db, baseline):
+        return JSONResponse({"error": "当前版本尚无可用备份，不能确认删除；请先重新检查"}, status_code=409)
     changed = db.run("UPDATE repositories SET deletion_approval=?, sync_requested=1, updated_at=? "
                      "WHERE id=? AND deletion_review=? AND enabled=1 AND status='needs_attention'",
                      (review, utcnow(), repo_id, repo["deletion_review"])).rowcount
@@ -611,14 +705,6 @@ def confirm_deletion(request: Request, repo_id: int, csrf: str = Form(""),
     log_event(db, repo_id, "check", f"已确认此次变更：{identity['target_sha']}；仅允许一次，执行前重新核验")
     worker.request_sync()
     return RedirectResponse(f"/repos/{repo_id}?notice=已确认此目标提交，等待同步前复核", status_code=302)
-
-
-@app.post("/repos/{repo_id}/{action}")
-def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""),
-                return_filter: str | None = Form(None)):
-    if action not in ("pause", "resume", "sync", "remove", "mode", "selfupdate"):
-        return JSONResponse({"error": "不支持的操作"}, status_code=400)
-    return _repo_action(request, repo_id, csrf, action, return_filter)
 
 
 @app.post("/repos/{repo_id}/actions")
@@ -632,6 +718,8 @@ def repo_actions_toggle(request: Request, repo_id: int, enabled: str = Form("0")
     repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
     if not repo:
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    if repo["restore_backup_id"] is not None:
+        return JSONResponse({"error": "回滚正在处理，请等待完成后再操作"}, status_code=409)
     client = client_from_settings(db)
     if client is None:
         return render(request, "message.html", title="尚未配置", body="请先完成 GitHub App 配置。")
@@ -646,6 +734,14 @@ def repo_actions_toggle(request: Request, repo_id: int, enabled: str = Form("0")
            (int(not want), utcnow(), repo_id))
     log_event(db, repo_id, "check", f"{repo['full_name']} Actions 已{'启用' if want else '禁用'}")
     return RedirectResponse(f"/repos/{repo_id}", status_code=302)
+
+
+@app.post("/repos/{repo_id}/{action}")
+def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""),
+                return_filter: str | None = Form(None)):
+    if action not in ("pause", "resume", "sync", "remove", "mode", "selfupdate"):
+        return JSONResponse({"error": "不支持的操作"}, status_code=400)
+    return _repo_action(request, repo_id, csrf, action, return_filter)
 
 
 @app.post("/repos/add", response_class=HTMLResponse)

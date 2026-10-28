@@ -20,6 +20,9 @@ class ProtectionTests(unittest.TestCase):
     base_sha = "d" * 40
 
     def setUp(self):
+        self.backup = mock.patch("app.engine.ensure_backup", return_value={"status": "ready"})
+        self.backup.start()
+        self.addCleanup(self.backup.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = DB(Path(self.tmp.name) / "forkiq.db")

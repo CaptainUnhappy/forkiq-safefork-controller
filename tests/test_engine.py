@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -167,6 +168,9 @@ class StubGitHub:
 
 class EngineTests(unittest.TestCase):
     def setUp(self):
+        backup = mock.patch("app.engine.ensure_backup", return_value={"status": "ready"})
+        backup.start()
+        self.addCleanup(backup.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = DB(Path(self.tmp.name) / "test.db")
@@ -283,7 +287,8 @@ class EngineTests(unittest.TestCase):
             ("update_ref", "me/demo", "main", "b" * 40),
             ("update_ref", "me/demo", "main", "c" * 40)])
         self.assertEqual([call for call in self.client.calls if call[0] == "get_ref"], [
-            ("get_ref", "me/demo"), ("get_ref", "me/demo"), ("get_ref", "up/demo"),
+            ("get_ref", "me/demo"), ("get_ref", "me/demo"), ("get_ref", "me/demo"), ("get_ref", "up/demo"),
+            ("get_ref", "me/demo"),
             ("get_ref", "me/demo"), ("get_ref", "me/demo"), ("get_ref", "me/demo")])
         for field in ("fork_tag", "upstream_tag", "fork_commit_at", "upstream_commit_at"):
             self.assertIsNone(row[field], field)
@@ -353,7 +358,8 @@ class EngineTests(unittest.TestCase):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
         self.client.ref_error["me/demo"] = RefObjectNotFound("Object does not exist")
         with mock.patch.object(self.client, "get_ref", side_effect=[
-                "a" * 40, "a" * 40, "c" * 40, "a" * 40, "a" * 40, "d" * 40]):
+                "a" * 40, "a" * 40, "a" * 40, "c" * 40,
+                "a" * 40, "a" * 40, "a" * 40, "d" * 40]):
             engine.run_cycle(self.db, self.client)
         self.assertEqual(self.status(), "error")
         self.assertIn("不一致", self.row()["last_error"])
@@ -662,6 +668,9 @@ class ManualModeTests(unittest.TestCase):
     """手工 fork mode: keep fork-unique commits, merge upstream in."""
 
     def setUp(self):
+        backup = mock.patch("app.engine.ensure_backup", return_value={"status": "ready"})
+        backup.start()
+        self.addCleanup(backup.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = DB(Path(self.tmp.name) / "test.db")
@@ -863,6 +872,9 @@ class SelfUpdateTests(unittest.TestCase):
     """Self-update keep-alive: dispatch a fork's own workflow when stale."""
 
     def setUp(self):
+        backup = mock.patch("app.engine.ensure_backup", return_value={"status": "ready"})
+        backup.start()
+        self.addCleanup(backup.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = DB(Path(self.tmp.name) / "test.db")

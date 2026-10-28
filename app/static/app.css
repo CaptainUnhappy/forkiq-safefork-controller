@@ -312,6 +312,13 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   .topbar { padding-inline: 22px; }
   .settings-section { grid-template-columns: 155px minmax(0, 1fr); gap: 24px; padding: 24px; }
 }
+.backup-list { list-style: none; margin: 16px 0; padding: 0; }
+.backup-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.backup-list li:last-child { border-bottom: 0; }
+.backup-version { display: grid; gap: 4px; min-width: 0; }
+.backup-version .muted { font-size: 12px; }
+.backup-sha { overflow-wrap: anywhere; }
+
 @media (max-width: 760px) {
   :root { --header-height: 60px; }
   html { scrollbar-gutter: auto; }

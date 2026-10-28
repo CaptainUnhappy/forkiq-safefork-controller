@@ -26,12 +26,12 @@
         <dt>检测基线</dt><dd class="mono">{{ deletion_review.identity.fork_sha }}</dd>
       </dl>
       {% if can_confirm_deletion %}
-      <form method="post" action="/repos/{{ repo.id }}/confirm-deletion" class="confirm" data-confirm="这会同步已检测到的删除，可能清空 fork 内容。仅确认当前目标提交，不能撤销此次同步。确认继续？">
+      <form method="post" action="/repos/{{ repo.id }}/confirm-deletion" class="confirm" data-confirm="这会同步已检测到的删除，可能清空 fork 内容。当前版本已备份，仅放行此目标的一次尝试。确认继续？">
         <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ deletion_token }}">
         <button class="danger">确认并同步此次变更</button>
       </form>
       <p class="field-help">确认仅使用一次。目标提交、fork 基线、分支、模式或保护规则变化后需重新确认；「立即同步」和「恢复」不会跳过保护。</p>
-      {% elif not deletion_review.error %}<p class="field-help">先恢复仓库并重新检查，再确认最新结果。</p>{% endif %}
+      {% elif not deletion_review.error %}<p class="field-help">需有当前版本的有效备份，且仓库未暂停，才可确认。请处理备份错误或恢复仓库后重新检查。</p>{% endif %}
     </section>
     {% endif %}
     <section class="card repo-sync-bar" aria-labelledby="repo-sync-title">
@@ -45,6 +45,23 @@
         <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary" disabled>立即同步</button></form>
         {% endif %}
       </div>
+    </section>
+    <section class="card" aria-labelledby="backups-title">
+      <h2 id="backups-title">服务器备份 · 最近 3 份</h2>
+      <p class="field-help">首次检查建立基线，每次真正更新前再备份当前版本；相同提交只保留一份。备份失败不更新，异常删除仍先拦截。</p>
+      {% if repo.restore_backup_id %}<p class="notice warn" role="status">回滚正在排队或执行，同步已暂停。完成后请刷新查看事件结果。</p>{% endif %}
+      {% if backup_error %}<p class="notice warn" role="alert">备份未完成：{{ backup_error.last_error }}。约 10 分钟后重试；期间不更新 fork。</p>{% endif %}
+      {% if backups %}
+      <ul class="backup-list">
+        {% for backup in backups %}
+        <li>
+          <div class="backup-version"><strong class="mono" title="{{ backup.fork_sha }}">{{ backup.fork_sha[:12] }}</strong><span class="muted">{{ timestamp(backup.created_at) }} · {{ '%.1f' | format(backup.size_bytes / 1048576) }} MiB</span><span class="mono backup-sha">{{ backup.fork_sha }}</span></div>
+          <div class="actions"><a class="secondary link" href="/backups/{{ backup.id }}/download">下载备份</a>{% if not repo.restore_backup_id %}<a class="danger link" href="/repos/{{ repo.id }}/backups/{{ backup.id }}/restore">回滚到此版本</a>{% endif %}</div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}<p class="muted">尚无完成的备份。首次检查时自动创建，未积累 3 个不同版本前按实际数量显示。</p>{% endif %}
+      <p class="field-help">备份包含所示提交的文件与全部可达 Git 历史，不含其他分支、Git LFS 实体和子模块内容。回滚会先备份当前版本，再覆盖本仓库「{{ repo.branch }}」分支，随后保持暂停。服务器故障仍需异地备份防护。</p>
     </section>
     <section class="card">
       <h2>仓库详情</h2>

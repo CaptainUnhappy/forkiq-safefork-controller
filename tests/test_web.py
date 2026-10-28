@@ -1,5 +1,6 @@
 """Web layer tests with FastAPI TestClient and a stub GitHub client."""
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -77,6 +78,7 @@ class WebTests(unittest.TestCase):
         self.addCleanup(public_url_env.stop)
         self.main.db.run("DELETE FROM sessions")
         self.main.db.run("DELETE FROM repositories")
+        self.main.db.run("DELETE FROM repository_backups")
         self.main.db.run("DELETE FROM events")
         self.main.db.run("DELETE FROM settings")
         self.main._login_failures.clear()
@@ -1335,6 +1337,7 @@ class WebTests(unittest.TestCase):
         from app.db import insert_repository
         from test_engine import StubGitHub, node
         self.main.db.run("DELETE FROM repositories")
+        self.main.db.run("DELETE FROM repository_backups")
         self.main.db.run("DELETE FROM events")
         repo_id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo",
                                     upstream_full_name="up/demo", node_id="N1")
@@ -1345,6 +1348,13 @@ class WebTests(unittest.TestCase):
         stub.file_trees["up/demo", "b" * 40] = {"README.md"}
         if tree_error:
             stub.tree_errors["up/demo", "b" * 40] = tree_error
+        backup = self.backup_record(repo_id, fork_sha="a" * 40)
+        verified = mock.patch.object(self.main, "verified_backup", return_value=True)
+        verified.start()
+        self.addCleanup(verified.stop)
+        backups = mock.patch.object(engine, "ensure_backup", return_value=backup)
+        backups.start()
+        self.addCleanup(backups.stop)
         self.main.db.set_setting("auto_discover", "0")
         engine.run_cycle(self.main.db, stub)
         row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
@@ -1352,6 +1362,31 @@ class WebTests(unittest.TestCase):
         self.assertEqual(stub.refs["me/demo"], "a" * 40)
         self.assertFalse(any(call[0] in ("update_ref", "merge_commit") for call in stub.calls))
         return repo_id, stub, row
+
+    def backup_record(self, repo_id, full_name="me/demo", fork_sha=None, status="ready",
+                      contents=b"isolated backup fixture\n", error=None):
+        """Publish an intact local file without invoking Git or GitHub."""
+        fork_sha = fork_sha or "a" * 40
+        now = self.main.utcnow()
+        cursor = self.main.db.run(
+            "INSERT INTO repository_backups(repo_id,full_name,fork_sha,status,created_at,updated_at,"
+            "sha256,size_bytes,last_error) VALUES(?,?,?,?,?,?,?,?,?)",
+            (repo_id, full_name, fork_sha, status, now, now,
+             hashlib.sha256(contents).hexdigest() if status == "ready" else None,
+             len(contents) if status == "ready" else None, error))
+        record = self.main.db.one("SELECT * FROM repository_backups WHERE id=?", (cursor.lastrowid,))
+        if status == "ready":
+            from app.backups import backup_path
+            root = Path(self.main.db.path).parent / "backups"
+            root.mkdir(mode=0o700, exist_ok=True)
+            backup_path(self.main.db, record).write_bytes(contents)
+        return dict(record)
+
+    def repository_with_backup(self):
+        from app.db import insert_repository
+        repo_id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo",
+                                    upstream_full_name="up/demo", node_id="N1")
+        return repo_id, self.backup_record(repo_id)
 
     def test_deletion_protection_defaults_and_inputs_have_accessible_labels(self):
         token = self.setup_admin()
@@ -1601,6 +1636,218 @@ class WebTests(unittest.TestCase):
                 if condition == "incomplete":
                     self.assertIn("检测未完成", response.text)
                     self.assertIn("tree unavailable &lt;retry&gt;", response.text)
+
+
+    def test_backup_download_requires_login_and_serves_a_verified_attachment_without_caching(self):
+        self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        from app.backups import backup_path, verified_backup
+        self.assertTrue(verified_backup(self.main.db, record))
+        with mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("download used GitHub")):
+            response = self.client.get(f"/backups/{record['id']}/download")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, backup_path(self.main.db, record).read_bytes())
+        self.assertIn("no-store", response.headers.get("cache-control", ""))
+        disposition = response.headers.get("content-disposition", "")
+        self.assertTrue(disposition.startswith("attachment;"), disposition)
+        self.assertIn(".bundle", disposition)
+        self.client.cookies.clear()
+        response = self.client.get(f"/backups/{record['id']}/download")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["location"], "/login")
+
+    def test_unavailable_or_corrupt_backup_cannot_be_downloaded_or_restored(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        from app.backups import backup_path
+        path = backup_path(self.main.db, record)
+        original = path.read_bytes()
+        preview_url = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        for condition in ("missing", "corrupt", "error"):
+            with self.subTest(condition=condition):
+                path.write_bytes(original)
+                self.main.db.run("UPDATE repository_backups SET status='ready' WHERE id=?", (record["id"],))
+                if condition == "missing":
+                    path.unlink()
+                elif condition == "corrupt":
+                    path.write_bytes(b"x" * len(original))
+                else:
+                    self.main.db.run("UPDATE repository_backups SET status='error' WHERE id=?", (record["id"],))
+                with mock.patch.object(self.main.worker, "request_sync") as wake, \
+                     mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("bad backup used GitHub")):
+                    self.assertEqual(self.client.get(f"/backups/{record['id']}/download").status_code, 409)
+                    self.assertEqual(self.client.get(preview_url).status_code, 409)
+                    response = self.client.post(preview_url, data={"csrf": self.csrf(token), "expected_sha": "c" * 40})
+                    self.assertEqual(response.status_code, 409)
+                    wake.assert_not_called()
+                self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+
+    def test_backup_restore_rejects_missing_records_and_cross_repository_snapshots(self):
+        token = self.setup_admin()
+        repo_id, _ = self.repository_with_backup()
+        foreign = self.backup_record(repo_id, full_name="other/demo", fork_sha="d" * 40)
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("invalid restore used GitHub")):
+            self.assertEqual(self.client.get("/backups/999999/download").status_code, 404)
+            for path in (f"/repos/{repo_id}/backups/999999/restore",
+                         f"/repos/{repo_id}/backups/{foreign['id']}/restore",
+                         f"/repos/999999/backups/{foreign['id']}/restore"):
+                with self.subTest(path=path):
+                    self.assertEqual(self.client.get(path).status_code, 404)
+                    self.assertEqual(self.client.post(path, data={"csrf": self.csrf(token), "expected_sha": "c" * 40}).status_code, 404)
+            wake.assert_not_called()
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+
+    def test_restore_preview_reads_current_head_and_renders_csrf_confirmation_without_mutation(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        path = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        stub = mock.Mock()
+        stub.get_ref.return_value = "c" * 40
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        before_events = [tuple(row) for row in self.main.db.all("SELECT * FROM events ORDER BY id")]
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", return_value=stub):
+            response, page = self.rendered_page(path)
+        stub.get_ref.assert_called_once_with("me/demo", "main")
+        self.assertEqual(stub.mock_calls, [mock.call.get_ref("me/demo", "main")])
+        wake.assert_not_called()
+        self.assert_page_accessibility(page)
+        form = self.assert_post_form(page, path, token)
+        self.assertEqual(page.inside(form, "input", name="expected_sha")[0]["attrs"]["value"], "c" * 40)
+        self.assertIn(record["fork_sha"], response.text)
+        self.assertIn("me/demo", response.text)
+        self.assertIn("暂停", response.text)
+        self.assertNotIn(TEST_PASSWORD, response.text)
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+        self.assertEqual([tuple(row) for row in self.main.db.all("SELECT * FROM events ORDER BY id")], before_events)
+
+    def test_restore_preview_and_queue_require_login_and_post_requires_csrf(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        path = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("unauthorized restore used GitHub")):
+            for csrf in (None, "wrong"):
+                response = self.client.post(path, data={"expected_sha": "c" * 40, **({"csrf": csrf} if csrf else {})})
+                self.assertEqual(response.status_code, 403)
+            self.client.cookies.clear()
+            for response in (self.client.get(path), self.client.post(path, data={"expected_sha": "c" * 40, "csrf": self.csrf(token)})):
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.headers["location"], "/login")
+            wake.assert_not_called()
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+
+    def test_restore_queue_validates_expected_sha_and_only_schedules_paused_work(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        path = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        self.main.db.run("UPDATE repositories SET sync_requested=1,deletion_approval='old' WHERE id=?", (repo_id,))
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        for sha in ("", "c" * 39, "c" * 41, "z" * 40, "无效提交"):
+            with self.subTest(sha=sha), mock.patch.object(self.main.worker, "request_sync") as wake, \
+                 mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("HTTP restore wrote GitHub")):
+                response = self.client.post(path, data={"csrf": self.csrf(token), "expected_sha": sha})
+                self.assertEqual(response.status_code, 400)
+                wake.assert_not_called()
+                self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+        idle_client = mock.Mock(spec=[])
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", return_value=idle_client):
+            response = self.client.post(path, data={"csrf": self.csrf(token), "expected_sha": "c" * 40})
+        self.assertEqual(idle_client.mock_calls, [])
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers["location"].startswith(f"/repos/{repo_id}"))
+        wake.assert_called_once()
+        queued = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual((queued["status"], queued["enabled"], queued["sync_requested"]), ("paused", 0, 0))
+        self.assertIsNone(queued["deletion_approval"])
+        self.assertEqual((queued["restore_backup_id"], queued["restore_expected_sha"]), (record["id"], "c" * 40))
+        self.assertEqual(queued["fork_sha"], before["fork_sha"])
+
+    def test_pending_restore_rejects_duplicate_queue_and_normal_repository_actions(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        path = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        self.main.db.run("UPDATE repositories SET status='paused',enabled=0,restore_backup_id=?,restore_expected_sha=? WHERE id=?",
+                         (record["id"], "c" * 40, repo_id))
+        before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("pending restore mutated GitHub")):
+            response = self.client.post(path, data={"csrf": self.csrf(token), "expected_sha": "d" * 40})
+            self.assertEqual(response.status_code, 409)
+            for action in ("pause", "resume", "sync", "mode", "selfupdate", "remove", "actions"):
+                with self.subTest(action=action):
+                    response = self.client.post(f"/repos/{repo_id}/{action}", data={"csrf": self.csrf(token), "enabled": "1"})
+                    self.assertEqual(response.status_code, 409)
+            wake.assert_not_called()
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+
+    def test_restore_belongs_to_repository_name_not_a_stale_row_identifier(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        self.main.db.run("UPDATE repository_backups SET repo_id=? WHERE id=?", (repo_id + 12345, record["id"]))
+        path = f"/repos/{repo_id}/backups/{record['id']}/restore"
+        stub = mock.Mock()
+        stub.get_ref.return_value = "c" * 40
+        with mock.patch.object(self.main, "client_from_settings", return_value=stub):
+            self.assertEqual(self.client.get(path).status_code, 200)
+        idle_client = mock.Mock(spec=[])
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", return_value=idle_client):
+            response = self.client.post(path, data={"csrf": self.csrf(token), "expected_sha": "c" * 40})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(idle_client.mock_calls, [])
+        wake.assert_called_once()
+
+    def test_dangerous_change_needs_an_intact_backup_of_its_exact_baseline_before_confirmation(self):
+        token = self.setup_admin()
+        repo_id, _, row = self.dangerous_deletion_review()
+        from app.protection import load_review, review_token
+        approval = review_token(load_review(row))
+        for condition in ("missing", "wrong_baseline", "corrupt", "error"):
+            with self.subTest(condition=condition):
+                self.main.db.run("DELETE FROM repository_backups")
+                if condition != "missing":
+                    record = self.backup_record(repo_id, fork_sha="d" * 40 if condition == "wrong_baseline" else "a" * 40,
+                                                status="error" if condition == "error" else "ready")
+                with mock.patch.object(self.main, "verified_backup", return_value=condition != "corrupt"), \
+                     mock.patch.object(self.main.worker, "request_sync") as wake:
+                    _, page = self.rendered_page(f"/repos/{repo_id}")
+                    self.assertFalse(page.find("form", action=f"/repos/{repo_id}/confirm-deletion"))
+                    response = self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval})
+                self.assertEqual(response.status_code, 409)
+                wake.assert_not_called()
+                current = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                self.assertEqual(current["sync_requested"], 0)
+                self.assertIsNone(current["deletion_approval"])
+
+    def test_repository_details_offer_only_three_newest_ready_backups_and_latest_error(self):
+        self.setup_admin()
+        repo_id, first = self.repository_with_backup()
+        records = [first]
+        for digit in "bcde":
+            records.append(self.backup_record(repo_id, fork_sha=digit * 40))
+        for index, record in enumerate(records):
+            self.main.db.run("UPDATE repository_backups SET created_at=?,updated_at=? WHERE id=?",
+                             (f"2026-10-28T0{index}:00:00+00:00", f"2026-10-28T0{index}:00:00+00:00", record["id"]))
+        older_error = self.backup_record(repo_id, fork_sha="f" * 40, status="error", error="Old backup error")
+        latest_error = self.backup_record(repo_id, fork_sha="1" * 40, status="error", error="Backup <disk full>")
+        self.main.db.run("UPDATE repository_backups SET updated_at=? WHERE id=?", ("2026-10-28T05:00:00+00:00", older_error["id"]))
+        self.main.db.run("UPDATE repository_backups SET updated_at=? WHERE id=?", ("2026-10-28T06:00:00+00:00", latest_error["id"]))
+        response, page = self.rendered_page(f"/repos/{repo_id}")
+        for record in records[-3:]:
+            self.assertTrue(page.find("a", href=f"/backups/{record['id']}/download"))
+            self.assertTrue(page.find("a", href=f"/repos/{repo_id}/backups/{record['id']}/restore"))
+        for record in records[:-3]:
+            self.assertFalse(page.find("a", href=f"/backups/{record['id']}/download"))
+        self.assertIn("Backup &lt;disk full&gt;", response.text)
+        self.assertNotIn("Backup <disk full>", response.text)
+        self.assertNotIn("Old backup error", response.text)
+        self.assertNotIn(TEST_PASSWORD, response.text)
 
 
 if __name__ == "__main__":

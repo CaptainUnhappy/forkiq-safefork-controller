@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import DB, log_event, insert_repository, utcnow
+from .backups import ensure_backup
 from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConflict,
                      RateLimited, RefNotFastForward, RefNotFound, RefObjectNotFound)
 from .protection import (assess_change, change_identity, deletion_policy, load_review,
@@ -504,17 +505,18 @@ def _deletion_guard(db, client, row, fork_sha, target_sha, comparison=None):
     if not live or not live["enabled"] or live["status"] == "paused":
         return False
     fatal = None
+    policy = None
     try:
         policy = deletion_policy(db, live)
         if any(live[key] != row[key] for key in ("mode", "branch", "upstream_full_name")):
             raise RuntimeError("同步配置已变化，请重新检查后再同步")
-        if not policy["enabled"]:
-            _set_repo(db, row["id"], deletion_review=None, deletion_approval=None)
-            return True
         if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
             raise RuntimeError("fork HEAD 已变化，请重新检查后再同步")
-        review = assess_change(client, row, fork_sha, target_sha, policy,
-                               previous=load_review(live), comparison=comparison)
+        review = (assess_change(client, row, fork_sha, target_sha, policy,
+                                previous=load_review(live), comparison=comparison)
+                  if policy["enabled"] else
+                  {"identity": change_identity(row, fork_sha, target_sha),
+                   "error": None, "reasons": []})
         if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
             raise RuntimeError("检测期间 fork HEAD 已变化，请重新检查后再同步")
         latest = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
@@ -523,6 +525,26 @@ def _deletion_guard(db, client, row, fork_sha, target_sha, comparison=None):
         if (deletion_policy(db, latest) != policy or
                 any(latest[key] != row[key] for key in ("mode", "branch", "upstream_full_name"))):
             raise RuntimeError("检测期间保护或同步配置已变化，请重新检查")
+    except Exception as error:
+        review = {"identity": change_identity(row, fork_sha, target_sha),
+                  "error": str(error)[:500], "reasons": []}
+        if isinstance(error, (RateLimited, AuthError)):
+            fatal = error
+    # A snapshot is mandatory even when deletion protection is disabled or the
+    # change is blocked. Approval never bypasses a failed backup.
+    if not _backup_guard(db, client, row, fork_sha, target_sha):
+        _set_repo(db, row["id"], deletion_review=review_json(review), deletion_approval=None)
+        if fatal:
+            raise fatal
+        return False
+    latest = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+    if not latest or not latest["enabled"] or latest["status"] == "paused":
+        return False
+    try:
+        if not review["error"] and (client.get_ref(row["full_name"], row["branch"]) != fork_sha or
+                deletion_policy(db, latest) != policy or
+                any(latest[key] != row[key] for key in ("mode", "branch", "upstream_full_name"))):
+            raise RuntimeError("备份期间 fork HEAD 或同步配置已变化，请重新检查")
     except Exception as error:
         review = {"identity": change_identity(row, fork_sha, target_sha),
                   "error": str(error)[:500], "reasons": []}
@@ -554,6 +576,22 @@ def _deletion_guard(db, client, row, fork_sha, target_sha, comparison=None):
               deletion_review=serialized, deletion_approval=None)
     if fatal:
         raise fatal
+    return False
+
+
+def _backup_guard(db, client, row, fork_sha, target_sha=None):
+    result = ensure_backup(db, client, row, fork_sha)
+    if result["status"] == "ready":
+        return True
+    live = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+    if not live or not live["enabled"] or live["status"] == "paused":
+        return False
+    message = f"同步前备份失败，未同步：{result.get('last_error') or '备份不可用'}。fork 当前内容已保留。"
+    if live["last_error"] != message or live["status"] != "needs_attention":
+        log_event(db, row["id"], "blocked", f"{row['full_name']} {message}")
+    _set_repo(db, row["id"], status="needs_attention", fork_sha=fork_sha,
+              upstream_sha=target_sha or live["upstream_sha"], last_check_at=utcnow(),
+              last_error=message, deletion_approval=None)
     return False
 
 
@@ -925,6 +963,19 @@ def run_cycle(db, client):
                 if node:
                     nodes[node["id"]] = node
         for row in rows[start:start + BATCH]:
+            row = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+            if not row or row["restore_backup_id"] is not None:
+                continue
+            node = nodes.get(row["node_id"]) if row["node_id"] else None
+            initial_sha = (((node or {}).get("defaultBranchRef") or {}).get("target") or {}).get("oid")
+            if initial_sha and not db.one(
+                    "SELECT id FROM repository_backups WHERE full_name=? AND status='ready' LIMIT 1",
+                    (row["full_name"],)):
+                if not _backup_guard(db, client, row, initial_sha):
+                    continue
+                row = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+                if not row or row["restore_backup_id"] is not None:
+                    continue
             if not row["enabled"]:
                 continue
             if row["status"] == "paused":
@@ -946,6 +997,21 @@ def run_cycle(db, client):
                           last_error=str(error)[:300])
                 log_event(db, row["id"], "error", f"{row['full_name']} 检查失败：{error}")
     return did_work
+
+
+def run_restore_requests(db, client):
+    # The same worker performs syncs and restores, so a restore cannot race a
+    # panel-originated ref update. External Git writers are guarded by a lease.
+    from .restore import rollback_backup
+    for row in db.all("SELECT * FROM repositories WHERE restore_backup_id IS NOT NULL ORDER BY id"):
+        try:
+            rollback_backup(db, client, row, row["restore_backup_id"], row["restore_expected_sha"])
+        except Exception:
+            message = "回滚未完成，仓库保持暂停；请核对 GitHub 分支和备份后重试。"
+            _set_repo(db, row["id"], enabled=0, status="paused", last_error=message)
+            log_event(db, row["id"], "error", message)
+        finally:
+            _set_repo(db, row["id"], restore_backup_id=None, restore_expected_sha=None)
 
 
 class Worker(threading.Thread):
@@ -987,6 +1053,7 @@ class Worker(threading.Thread):
         client = client_from_settings(db)
         if client is None:
             return
+        run_restore_requests(db, client)
         discover_requested = db.get_setting("discover_requested") == "1"
         last_discover = db.get_setting("last_discover_at")
         due = True
