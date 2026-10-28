@@ -1,4 +1,5 @@
 """Web layer tests with FastAPI TestClient and a stub GitHub client."""
+import json
 import sys
 import tempfile
 import unittest
@@ -71,6 +72,9 @@ class WebTests(unittest.TestCase):
         cls.main.db = main_module.DB(Path(cls.tmp.name) / "forkiq.db")
 
     def setUp(self):
+        public_url_env = mock.patch.dict("os.environ", {"FORKIQ_PUBLIC_URL": "https://forkiq.example"})
+        public_url_env.start()
+        self.addCleanup(public_url_env.stop)
         self.main.db.run("DELETE FROM sessions")
         self.main.db.run("DELETE FROM repositories")
         self.main.db.run("DELETE FROM events")
@@ -869,8 +873,12 @@ class WebTests(unittest.TestCase):
                 self.assertIn(label, section["text"])
                 if not installation_id:
                     self.assertTrue(page.inside(section, "a", href="/github/connect"))
+                if slug and not installation_id:
+                    self.assertTrue(page.inside(section, "a", href="https://github.com/apps/forkiq-test/installations/new"))
+                    self.assert_post_form(page, "/github/detect", token)
                 if not slug:
                     self.assertFalse(page.find("form", action="/settings/disconnect"))
+                    self.assertFalse(page.find("form", action="/github/detect"))
         self.main.db.set_setting("auth_error", "Credentials <expired>")
         response, page = self.rendered_page("/settings?notice=Saved")
         self.assertIn("Saved", page.find("div", role="status")[0]["text"])
@@ -892,7 +900,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(form["attrs"].get("method"), "post")
         import json
         payload = json.loads(page.inside(form, "input", name="manifest")[0]["attrs"]["value"])
-        self.assertEqual(payload["redirect_url"], "https://fork.llkan.com/api/github/callback")
+        self.assertEqual(payload["redirect_url"], "https://forkiq.example/api/github/callback")
         self.assertEqual(payload["default_permissions"]["workflows"], "write")
         app_payload = {"id": 123, "slug": "forkiq-test", "pem": "test-pem"}
         with mock.patch.object(self.main, "exchange_manifest", return_value=app_payload), \
@@ -907,6 +915,127 @@ class WebTests(unittest.TestCase):
         self.assertTrue(awaiting_installation.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
         self.assert_post_form(awaiting_installation, "/github/detect", token)
         self.assertFalse(awaiting_installation.find("form", id="manifest-form"))
+
+    def test_manifest_uses_configured_origin_not_host_or_forwarded_headers(self):
+        self.setup_admin()
+        for origin in ("https://selfhost.example:8443/", "http://localhost:8792", "http://[::1]:8792/"):
+            with self.subTest(origin=origin), mock.patch.dict("os.environ", {"FORKIQ_PUBLIC_URL": origin}):
+                response = self.client.get("/github/connect", headers={
+                    "host": "attacker.example", "x-forwarded-host": "another.example",
+                    "x-forwarded-proto": "http"})
+                self.assertEqual(response.status_code, 200)
+                page = RenderedHTML(response.text)
+                form = page.find("form", id="manifest-form")[0]
+                payload = json.loads(page.inside(form, "input", name="manifest")[0]["attrs"]["value"])
+                base = origin.rstrip("/")
+                self.assertEqual(payload["url"], base)
+                self.assertEqual(payload["hook_attributes"], {"url": base + "/healthz", "active": False})
+                self.assertEqual(payload["redirect_url"], base + "/api/github/callback")
+                self.assertEqual(payload["callback_urls"], [base + "/api/github/callback"])
+                self.assertNotIn("fork.llkan.com", response.text)
+                self.assertNotIn("attacker.example", response.text)
+                self.assertNotIn("another.example", response.text)
+
+    def test_missing_public_url_blocks_app_creation_and_can_be_corrected(self):
+        self.setup_admin()
+        with mock.patch.dict("os.environ", {"FORKIQ_PUBLIC_URL": ""}):
+            response, page = self.rendered_page("/github/connect")
+        self.assertTrue(page.find("div", role="alert"))
+        self.assertIn("FORKIQ_PUBLIC_URL", response.text)
+        self.assertFalse(page.find("form", id="manifest-form"))
+        self.assertNotIn("fork.llkan.com", response.text)
+        self.assertIsNone(self.main.db.get_setting("github_manifest_state"))
+        _, corrected = self.rendered_page("/github/connect")
+        self.assertTrue(corrected.find("form", id="manifest-form"))
+        self.assertTrue(self.main.db.get_setting("github_manifest_state"))
+
+    def test_invalid_public_origins_never_create_a_manifest_or_replace_state(self):
+        self.setup_admin()
+        self.main.db.set_setting("github_manifest_state", "previous-state")
+        invalid = ("fork.example", "//fork.example", "ftp://fork.example", "https://",
+                   "https://user:password@fork.example", "https://@fork.example",
+                   "https://fork.example/subpath", "https://fork.example//",
+                   "https://fork.example?query=1", "https://fork.example?",
+                   "https://fork.example#fragment", "https://fork.example#",
+                   "https://fork.example:bad", "https://fork.example:65536",
+                   "https://fork.example:0", "https://fork.example:",
+                   " https://fork.example", "https://fork.example\n", "https://fork. example",
+                   "https://fork.example\\@other.example", "https://fork%2eexample",
+                   "https://-fork.example", "https://fork..example", "https://[not-ipv6]",
+                   "https://[::1]other.example", "https://[::1]other.example:8792")
+        for origin in invalid:
+            with self.subTest(origin=origin), mock.patch.dict("os.environ", {"FORKIQ_PUBLIC_URL": origin}):
+                response, page = self.rendered_page("/github/connect")
+                self.assertIn("FORKIQ_PUBLIC_URL", response.text)
+                self.assertTrue(page.find("div", role="alert"))
+                self.assertFalse(page.find("form", id="manifest-form"))
+                self.assertEqual(self.main.db.get_setting("github_manifest_state"), "previous-state")
+
+    def test_existing_app_can_finish_installation_without_public_url_configuration(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        with mock.patch.dict("os.environ", {"FORKIQ_PUBLIC_URL": ""}):
+            for path in ("/github/connect", "/settings"):
+                with self.subTest(path=path):
+                    response, page = self.rendered_page(path)
+                    self.assertNotIn("FORKIQ_PUBLIC_URL", response.text)
+                    self.assertTrue(page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+                    self.assert_post_form(page, "/github/detect", token)
+                    self.assertFalse(page.find("form", id="manifest-form"))
+
+    def test_detection_before_installation_can_be_retried_after_leaving_the_page(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        stub = mock.Mock()
+        stub.app_installations.side_effect = [[], [{"id": 999, "account": {"login": "owner"}}]]
+        with mock.patch.object(self.main, "app_client_from_settings", return_value=stub):
+            response = self.client.post("/github/detect", data={"csrf": self.csrf(token)})
+            self.assertEqual(response.status_code, 200)
+            page = RenderedHTML(response.text)
+            self.assertIn("尚未安装", response.text)
+            self.assertTrue(page.find("a", href="https://github.com/apps/forkiq-test/installations/new"))
+            self.assert_post_form(page, "/github/detect", token)
+            self.assertFalse(self.main.db.get_setting("github_installation_id"))
+            self.rendered_page("/")
+            _, settings = self.rendered_page("/settings")
+            form = self.assert_post_form(settings, "/github/detect", token)
+            csrf = settings.inside(form, "input", name="csrf")[0]["attrs"]["value"]
+            response = self.client.post("/github/detect", data={"csrf": csrf})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.main.db.get_setting("github_installation_id"), "999")
+        self.assertEqual(stub.app_installations.call_count, 2)
+
+    def test_failed_detection_keeps_installation_and_retry_controls(self):
+        token = self.setup_admin()
+        self.main.db.set_setting("github_app_slug", "forkiq-test")
+        stub = mock.Mock()
+        stub.app_installations.side_effect = self.main.AuthError("credentials <expired>")
+        for installation_id in ("", "999"):
+            with self.subTest(installation_id=installation_id):
+                self.main.db.set_setting("github_installation_id", installation_id)
+                with mock.patch.object(self.main, "app_client_from_settings", return_value=stub):
+                    response = self.client.post("/github/detect", data={"csrf": self.csrf(token)})
+                page = RenderedHTML(response.text)
+                self.assertIn("检测失败", response.text)
+                self.assertIn("credentials &lt;expired&gt;", response.text)
+                install_url = ("https://github.com/settings/installations/999" if installation_id
+                               else "https://github.com/apps/forkiq-test/installations/new")
+                self.assertTrue(page.find("a", href=install_url))
+                self.assert_post_form(page, "/github/detect", token)
+                self.assertFalse(page.find("form", id="manifest-form"))
+                self.assertEqual(self.main.db.get_setting("github_installation_id"), installation_id)
+
+    def test_detection_still_requires_login_and_csrf(self):
+        token = self.setup_admin()
+        with mock.patch.object(self.main, "app_client_from_settings") as client:
+            for data in ({}, {"csrf": "wrong"}):
+                self.assertEqual(self.client.post("/github/detect", data=data).status_code, 403)
+            self.client.cookies.clear()
+            response = self.client.post("/github/detect", data={"csrf": self.csrf(token)})
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["location"], "/login")
+            self.assertEqual(self.client.get("/github/connect").headers["location"], "/login")
+            client.assert_not_called()
 
     def test_existing_app_connection_does_not_recreate_or_reset_manifest_state(self):
         token = self.setup_admin()
@@ -1200,6 +1329,278 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(self.main.db.get_setting("check_interval"), "90")
                 self.assertEqual(self.main.db.get_setting("auto_discover"), "1")
                 wake.assert_not_called()
+
+    def dangerous_deletion_review(self, tree_error=None):
+        """Run the real engine against immutable four-file/one-file fixtures."""
+        from app.db import insert_repository
+        from test_engine import StubGitHub, node
+        self.main.db.run("DELETE FROM repositories")
+        self.main.db.run("DELETE FROM events")
+        repo_id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo",
+                                    upstream_full_name="up/demo", node_id="N1")
+        stub = StubGitHub()
+        stub.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
+        stub.refs["me/demo"] = "a" * 40
+        stub.file_trees["me/demo", "a" * 40] = {"README.md", "one.py", "two.py", "three.py"}
+        stub.file_trees["up/demo", "b" * 40] = {"README.md"}
+        if tree_error:
+            stub.tree_errors["up/demo", "b" * 40] = tree_error
+        self.main.db.set_setting("auto_discover", "0")
+        engine.run_cycle(self.main.db, stub)
+        row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual(row["status"], "needs_attention")
+        self.assertEqual(stub.refs["me/demo"], "a" * 40)
+        self.assertFalse(any(call[0] in ("update_ref", "merge_commit") for call in stub.calls))
+        return repo_id, stub, row
+
+    def test_deletion_protection_defaults_and_inputs_have_accessible_labels(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        from app.protection import deletion_policy
+        repo_id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo",
+                                    upstream_full_name="up/demo")
+        expected = {"enabled": True, "max_files": 100, "max_percent": 50}
+        row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual(deletion_policy(self.main.db), expected)
+        self.assertEqual(deletion_policy(self.main.db, row), expected)
+        for path, action in (("/settings", "/settings/deletion-protection"),
+                             (f"/repos/{repo_id}", f"/repos/{repo_id}/protection")):
+            with self.subTest(path=path):
+                response, page = self.rendered_page(path)
+                form = self.assert_post_form(page, action, token)
+                fields = [field for field in page.inside(form, "input")
+                          if field["attrs"].get("type") != "hidden"] + page.inside(form, "select")
+                self.assertEqual(len(fields), 3)
+                for field in fields:
+                    self.assertTrue(page.labels_for(field), field["attrs"].get("name"))
+                self.assertNotIn(TEST_PASSWORD, response.text)
+                if path == "/settings":
+                    self.assertIn("checked", page.inside(form, "input", name="enabled")[0]["attrs"])
+                    self.assertEqual(page.inside(form, "input", name="max_files")[0]["attrs"]["value"], "100")
+                    self.assertEqual(float(page.inside(form, "input", name="max_percent")[0]["attrs"]["value"]), 50)
+                else:
+                    selected = [option["attrs"]["value"] for option in page.inside(form, "option")
+                                if "selected" in option["attrs"]]
+                    self.assertEqual(selected, ["inherit"])
+                    for name in ("max_files", "max_percent"):
+                        self.assertEqual(page.inside(form, "input", name=name)[0]["attrs"]["value"], "")
+
+    def test_system_deletion_settings_save_and_invalid_values_do_not_write(self):
+        token = self.setup_admin()
+        repo_id, _, _ = self.dangerous_deletion_review()
+        self.main.db.run("UPDATE repositories SET deletion_approval='old-approval' WHERE id=?", (repo_id,))
+        payload = {"csrf": self.csrf(token), "enabled": "0", "max_files": "27", "max_percent": "12.5"}
+        with mock.patch.object(self.main.worker, "request_sync") as wake:
+            response = self.client.post("/settings/deletion-protection", data=payload)
+        self.assertEqual(response.status_code, 302)
+        wake.assert_called_once()
+        self.assertEqual(self.main.db.get_setting("deletion_protection"), "0")
+        self.assertEqual(self.main.db.get_setting("deletion_max_files"), "27")
+        self.assertEqual(self.main.db.get_setting("deletion_max_percent"), "12.5")
+        self.assertIsNone(self.main.db.one("SELECT deletion_approval FROM repositories WHERE id=?", (repo_id,))[0])
+        for field, invalid in (("enabled", "yes"), ("max_files", "-1"), ("max_files", "1.5"),
+                               ("max_files", "1000001"), ("max_files", ""),
+                               ("max_percent", "-1"), ("max_percent", "100.1"),
+                               ("max_percent", "nan"), ("max_percent", "inf"),
+                               ("max_percent", "")):
+            with self.subTest(field=field, invalid=invalid):
+                before = [tuple(row) for row in self.main.db.all("SELECT * FROM settings ORDER BY key")]
+                before_repo = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+                with mock.patch.object(self.main.worker, "request_sync") as wake:
+                    response = self.client.post("/settings/deletion-protection", data={**payload, field: invalid})
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.json()["error"])
+                self.assertEqual([tuple(row) for row in self.main.db.all("SELECT * FROM settings ORDER BY key")], before)
+                self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before_repo)
+                wake.assert_not_called()
+
+    def test_repository_deletion_policy_can_override_partially_and_clear_to_inherit(self):
+        token = self.setup_admin()
+        repo_id, _, _ = self.dangerous_deletion_review()
+        from app.protection import deletion_policy
+        self.main.db.set_setting("deletion_protection", "0")
+        self.main.db.set_setting("deletion_max_files", "80")
+        self.main.db.set_setting("deletion_max_percent", "40")
+        cases = [({"protection_mode": "on", "max_files": "5", "max_percent": "2.5"},
+                  (1, 5, 2.5), {"enabled": True, "max_files": 5, "max_percent": 2.5}),
+                 ({"protection_mode": "off", "max_files": "", "max_percent": ""},
+                  (0, None, None), {"enabled": False, "max_files": 80, "max_percent": 40}),
+                 ({"protection_mode": "inherit", "max_files": "3", "max_percent": ""},
+                  (None, 3, None), {"enabled": False, "max_files": 3, "max_percent": 40}),
+                 ({"protection_mode": "inherit", "max_files": "", "max_percent": ""},
+                  (None, None, None), {"enabled": False, "max_files": 80, "max_percent": 40})]
+        for payload, stored, expected in cases:
+            with self.subTest(payload=payload):
+                self.main.db.run("UPDATE repositories SET deletion_approval='old-approval' WHERE id=?", (repo_id,))
+                with mock.patch.object(self.main.worker, "request_sync") as wake:
+                    response = self.client.post(f"/repos/{repo_id}/protection", data={"csrf": self.csrf(token), **payload})
+                self.assertEqual(response.status_code, 302)
+                wake.assert_called_once()
+                row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                self.assertEqual(tuple(row[key] for key in ("deletion_protection", "deletion_max_files", "deletion_max_percent")), stored)
+                self.assertEqual(deletion_policy(self.main.db, row), expected)
+                self.assertIsNone(row["deletion_approval"])
+        for payload in ({"protection_mode": "invalid"}, {"max_files": "0.5"},
+                        {"max_percent": "101"}, {"max_percent": "nan"}):
+            before = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+            with self.subTest(invalid=payload), mock.patch.object(self.main.worker, "request_sync") as wake:
+                response = self.client.post(f"/repos/{repo_id}/protection", data={"csrf": self.csrf(token), **payload})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
+                wake.assert_not_called()
+
+    def test_deletion_protection_mutations_require_login_and_csrf(self):
+        token = self.setup_admin()
+        repo_id, _, _ = self.dangerous_deletion_review()
+        routes = [("/settings/deletion-protection", {"enabled": "1", "max_files": "3", "max_percent": "1"}),
+                  (f"/repos/{repo_id}/protection", {"protection_mode": "off"}),
+                  (f"/repos/{repo_id}/confirm-deletion", {"review": "old"})]
+        before_settings = [tuple(row) for row in self.main.db.all("SELECT * FROM settings ORDER BY key")]
+        before_repo = dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
+        with mock.patch.object(self.main.worker, "request_sync") as wake:
+            for route, payload in routes:
+                for csrf in (None, "wrong"):
+                    with self.subTest(route=route, csrf=csrf):
+                        response = self.client.post(route, data={**payload, **({"csrf": csrf} if csrf else {})})
+                        self.assertEqual(response.status_code, 403)
+            self.client.cookies.clear()
+            for route, payload in routes:
+                with self.subTest(unauthenticated=route):
+                    response = self.client.post(route, data={**payload, "csrf": self.csrf(token)})
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(response.headers["location"], "/login")
+            wake.assert_not_called()
+        self.assertEqual([tuple(row) for row in self.main.db.all("SELECT * FROM settings ORDER BY key")], before_settings)
+        self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before_repo)
+
+    def test_dangerous_deletion_details_show_review_counts_target_and_confirmation(self):
+        token = self.setup_admin()
+        repo_id, _, row = self.dangerous_deletion_review()
+        from app.protection import load_review, review_token
+        review = load_review(row)
+        self.assertEqual((review["deleted_files"], review["current_files"], review["deleted_percent"]), (3, 4, 75))
+        response, page = self.rendered_page(f"/repos/{repo_id}")
+        section = page.find("section", **{"aria-labelledby": "deletion-review-title"})[0]
+        self.assertIn("已保留 fork 当前内容", section["text"])
+        self.assertIn("3 / 4（75.0%）", section["text"])
+        target = page.inside(section, "a", href="https://github.com/up/demo/commit/" + "b" * 40)[0]
+        self.assertEqual(target["text"], "b" * 40)
+        form = self.assert_post_form(page, f"/repos/{repo_id}/confirm-deletion", token)
+        self.assertEqual(page.inside(form, "input", name="review")[0]["attrs"]["value"], review_token(review))
+        self.assertTrue(form["attrs"].get("data-confirm"))
+        self.assertIn("确认并同步此次变更", form["text"])
+        self.assertNotIn(TEST_PASSWORD, response.text)
+
+    def test_confirm_deletion_only_queues_work_and_worker_consumes_exact_target_once(self):
+        token = self.setup_admin()
+        repo_id, stub, row = self.dangerous_deletion_review()
+        from app.protection import load_review, review_token
+        from test_engine import node
+        approval = review_token(load_review(row))
+        before_calls = list(stub.calls)
+        with mock.patch.object(self.main.worker, "request_sync") as wake, \
+             mock.patch.object(self.main, "client_from_settings", side_effect=AssertionError("HTTP handler wrote GitHub")), \
+             mock.patch.object(self.main, "app_client_from_settings", side_effect=AssertionError("HTTP handler wrote GitHub")):
+            response = self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval})
+        self.assertEqual(response.status_code, 302)
+        wake.assert_called_once()
+        queued = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual((queued["sync_requested"], queued["deletion_approval"]), (1, approval))
+        self.assertEqual(stub.calls, before_calls)
+        self.assertEqual(stub.refs["me/demo"], "a" * 40)
+        with mock.patch.object(engine, "client_from_settings", return_value=stub):
+            self.main.worker._tick(self.main.db)
+        synced = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual((synced["status"], synced["fork_sha"], synced["sync_requested"]), ("synced", "b" * 40, 0))
+        self.assertIsNone(synced["deletion_approval"])
+        self.assertEqual([call for call in stub.calls if call[0] == "update_ref"], [("update_ref", "me/demo", "main", "b" * 40)])
+        response = self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval})
+        self.assertEqual(response.status_code, 409)
+        stub.nodes["N1"] = node("N1", "me/demo", "up/demo", "b" * 40, "c" * 40)
+        stub.file_trees["me/demo", "b" * 40] = {"README.md"}
+        stub.file_trees["up/demo", "c" * 40] = set()
+        with mock.patch.object(engine, "client_from_settings", return_value=stub):
+            self.main.worker._tick(self.main.db)
+        blocked = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual(blocked["status"], "needs_attention")
+        self.assertEqual(stub.refs["me/demo"], "b" * 40)
+        self.assertEqual(load_review(blocked)["identity"]["target_sha"], "c" * 40)
+        self.assertEqual([call for call in stub.calls if call[0] == "update_ref"], [("update_ref", "me/demo", "main", "b" * 40)])
+
+    def test_upstream_change_after_confirmation_requires_a_fresh_review(self):
+        token = self.setup_admin()
+        repo_id, stub, row = self.dangerous_deletion_review()
+        from app.protection import load_review, review_token
+        from test_engine import node
+        approval = review_token(load_review(row))
+        self.assertEqual(self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval}).status_code, 302)
+        stub.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "c" * 40)
+        stub.file_trees["up/demo", "c" * 40] = set()
+        with mock.patch.object(engine, "client_from_settings", return_value=stub):
+            self.main.worker._tick(self.main.db)
+        row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+        self.assertEqual(row["status"], "needs_attention")
+        self.assertIsNone(row["deletion_approval"])
+        self.assertEqual(load_review(row)["identity"]["target_sha"], "c" * 40)
+        self.assertEqual(stub.refs["me/demo"], "a" * 40)
+        self.assertFalse(any(call[0] in ("update_ref", "merge_commit") for call in stub.calls))
+        self.assertEqual(self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval}).status_code, 409)
+
+    def test_stale_deletion_confirmation_is_rejected_after_identity_or_policy_changes(self):
+        token = self.setup_admin()
+        from app.protection import load_review, review_token
+        changes = [("upstream_sha", "c" * 40), ("fork_sha", "d" * 40),
+                   ("mode", "manual"), ("branch", "other"), ("upstream_full_name", "other/demo"),
+                   ("deletion_max_files", 5), ("system_policy", "12")]
+        for field, value in changes:
+            with self.subTest(field=field):
+                self.main.db.run("DELETE FROM settings WHERE key LIKE 'deletion_%'")
+                repo_id, _, row = self.dangerous_deletion_review()
+                approval = review_token(load_review(row))
+                if field == "system_policy":
+                    self.main.db.set_setting("deletion_max_percent", value)
+                else:
+                    self.main.db.run(f"UPDATE repositories SET {field}=? WHERE id=?", (value, repo_id))
+                with mock.patch.object(self.main.worker, "request_sync") as wake:
+                    response = self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval})
+                self.assertEqual(response.status_code, 409)
+                wake.assert_not_called()
+                row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                self.assertEqual(row["sync_requested"], 0)
+                self.assertIsNone(row["deletion_approval"])
+                _, page = self.rendered_page(f"/repos/{repo_id}")
+                self.assertFalse(page.find("form", action=f"/repos/{repo_id}/confirm-deletion"))
+
+    def test_wrong_token_paused_repo_and_incomplete_detection_cannot_be_confirmed(self):
+        token = self.setup_admin()
+        from app.protection import load_review, review_token
+        for condition in ("wrong_token", "non_ascii_token", "paused", "disabled", "incomplete"):
+            with self.subTest(condition=condition):
+                repo_id, _, row = self.dangerous_deletion_review(
+                    RuntimeError("tree unavailable <retry>") if condition == "incomplete" else None)
+                approval = review_token(load_review(row))
+                if condition == "wrong_token":
+                    approval = "wrong-token"
+                elif condition == "non_ascii_token":
+                    approval = "无效确认"
+                elif condition == "paused":
+                    self.main.db.run("UPDATE repositories SET status='paused' WHERE id=?", (repo_id,))
+                elif condition == "disabled":
+                    self.main.db.run("UPDATE repositories SET enabled=0 WHERE id=?", (repo_id,))
+                with mock.patch.object(self.main.worker, "request_sync") as wake:
+                    response = self.client.post(f"/repos/{repo_id}/confirm-deletion", data={"csrf": self.csrf(token), "review": approval})
+                self.assertEqual(response.status_code, 409)
+                wake.assert_not_called()
+                row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                self.assertEqual(row["sync_requested"], 0)
+                self.assertIsNone(row["deletion_approval"])
+                response, page = self.rendered_page(f"/repos/{repo_id}")
+                self.assertNotIn(TEST_PASSWORD, response.text)
+                if condition not in ("wrong_token", "non_ascii_token"):
+                    self.assertFalse(page.find("form", action=f"/repos/{repo_id}/confirm-deletion"))
+                if condition == "incomplete":
+                    self.assertIn("检测未完成", response.text)
+                    self.assertIn("tree unavailable &lt;retry&gt;", response.text)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,11 @@ import hmac
 import json
 import math
 import os
+import re
 import secrets
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -19,6 +20,7 @@ from .errors import error_guidance
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
 from .github import AuthError, exchange_manifest, write_pem
+from .protection import deletion_policy, load_review, parse_limits, review_token
 from .versions import annotate, fork_tone, short_time, version_verdict
 
 STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
@@ -215,15 +217,47 @@ def logout(request: Request):
 
 
 # -- GitHub App connection -------------------------------------------------
+def public_url():
+    value = os.environ.get("FORKIQ_PUBLIC_URL", "")
+    if not value:
+        raise ValueError("请先设置 FORKIQ_PUBLIC_URL 为本实例的公网地址，再重启服务，例如 https://fork.example.com。")
+    try:
+        parsed = urlsplit(value)
+        if (any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+                or parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in ("", "/") or "?" in value or "#" in value
+                or "\\" in value or "%" in parsed.netloc or parsed.netloc.endswith(":")):
+            raise ValueError
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError
+        if ":" in parsed.hostname:
+            from ipaddress import IPv6Address
+            if not re.fullmatch(r"\[[^]]+\](?::[0-9]+)?", parsed.netloc):
+                raise ValueError
+            IPv6Address(parsed.hostname)
+        else:
+            hostname = parsed.hostname.encode("idna").decode("ascii").rstrip(".")
+            if len(hostname) > 253 or not all(
+                    re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                    for label in hostname.split(".")):
+                raise ValueError
+    except (ValueError, UnicodeError):
+        raise ValueError("FORKIQ_PUBLIC_URL 必须是有效的 http(s) 根地址，可带端口；不能包含账号、子路径、查询参数或片段。") from None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def manifest_payload():
+    # Never derive credential callback destinations from untrusted Host headers.
+    base_url = public_url()
     state = secrets.token_urlsafe(16)
     db.set_setting("github_manifest_state", state)
     return state, {
         "name": "ForkIQ",
-        "url": "https://fork.llkan.com",
-        "hook_attributes": {"url": "https://fork.llkan.com/healthz", "active": False},
-        "redirect_url": "https://fork.llkan.com/api/github/callback",
-        "callback_urls": ["https://fork.llkan.com/api/github/callback"],
+        "url": base_url,
+        "hook_attributes": {"url": f"{base_url}/healthz", "active": False},
+        "redirect_url": f"{base_url}/api/github/callback",
+        "callback_urls": [f"{base_url}/api/github/callback"],
         "public": False,
         "request_oauth_on_install": False,
         "setup_on_update": False,
@@ -239,13 +273,23 @@ def github_connect(request: Request):
     guard = require_login(request)
     if guard:
         return guard
+    return github_connection_page(request)
+
+
+def github_connection_page(request, detect_error=""):
     app_slug = db.get_setting("github_app_slug")
-    state, payload = ("", {}) if app_slug else manifest_payload()
+    state, payload, config_error = "", {}, ""
+    if not app_slug:
+        try:
+            state, payload = manifest_payload()
+        except ValueError as error:
+            config_error = str(error)
     return render(request, "connect.html", manifest=json.dumps(payload, ensure_ascii=False),
                   manifest_url=MANIFEST_URL, state=state,
                   app_slug=app_slug,
                   installation_id=db.get_setting("github_installation_id"),
-                  auth_error=db.get_setting("auth_error", ""))
+                  auth_error=db.get_setting("auth_error", ""),
+                  config_error=config_error, detect_error=detect_error)
 
 
 @app.get("/api/github/callback", response_class=HTMLResponse)
@@ -277,14 +321,13 @@ def github_detect(request: Request, csrf: str = Form("")):
         return denied
     client = app_client_from_settings(db)
     if client is None:
-        return render(request, "message.html", title="尚未配置", body="请先完成 GitHub App 创建。")
+        return github_connection_page(request, detect_error="请先完成 GitHub App 创建。")
     try:
         installations = client.app_installations()
     except AuthError as error:
-        return render(request, "message.html", title="检测失败", body=str(error))
+        return github_connection_page(request, detect_error=f"检测失败：{error}")
     if not installations:
-        return render(request, "message.html", title="尚未安装",
-                      body="没有找到安装记录。请先在 GitHub 上完成安装，再回来点击检测。")
+        return github_connection_page(request, detect_error="尚未安装：请先在 GitHub 完成安装，再返回检测。")
     installation = installations[0]
     db.set_setting("github_installation_id", installation["id"])
     account = (installation.get("account") or {}).get("login", "?")
@@ -415,8 +458,20 @@ def repo_detail(request: Request, repo_id: int):
         return render(request, "message.html", title="未找到", body="仓库不在管理列表中。")
     events = db.all("SELECT * FROM events WHERE repo_id=? ORDER BY id DESC LIMIT 50", (repo_id,))
     verdict = version_verdict(repo)
+    policy = deletion_policy(db, repo)
+    review = load_review(repo)
+    can_confirm = bool(review and review.get("reasons") and not review.get("error")
+                       and repo["enabled"] and repo["status"] == "needs_attention"
+                       and review.get("policy") == policy
+                       and review.get("identity") == {
+                           "fork_sha": repo["fork_sha"], "target_sha": repo["upstream_sha"],
+                           "upstream": repo["upstream_full_name"], "mode": repo["mode"],
+                           "branch": repo["branch"]})
     return render(request, "repo_detail.html", repo=repo, events=events,
-                  verdict=verdict, fork_tone=fork_tone(verdict))
+                  verdict=verdict, fork_tone=fork_tone(verdict), protection=policy,
+                  deletion_review=review, can_confirm_deletion=can_confirm,
+                  deletion_token=review_token(review) if can_confirm else "",
+                  notice=request.query_params.get("notice", ""))
 
 
 def _repo_action(request, repo_id, csrf, action, return_filter=None):
@@ -430,11 +485,11 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
     if not repo:
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
     if action == "pause":
-        db.run("UPDATE repositories SET status='paused', enabled=0, updated_at=? WHERE id=?",
+        db.run("UPDATE repositories SET status='paused', enabled=0, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
         log_event(db, repo_id, "blocked", f"{repo['full_name']} 已暂停")
     elif action == "resume":
-        db.run("UPDATE repositories SET status='pending', enabled=1, last_error=NULL, updated_at=? WHERE id=?",
+        db.run("UPDATE repositories SET status='pending', enabled=1, last_error=NULL, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
         log_event(db, repo_id, "check", f"{repo['full_name']} 已恢复")
     elif action == "sync":
@@ -444,6 +499,7 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
         mode = "manual" if repo["mode"] == "mirror" else "mirror"
         db.run("UPDATE repositories SET mode=?, status='pending', last_error=NULL, "
                "diverged_at=NULL, diverged_upstream_sha=NULL, sync_requested=1, "
+               "deletion_review=NULL, deletion_approval=NULL, "
                "updated_at=? WHERE id=?", (mode, utcnow(), repo_id))
         label = "手工 fork（保留自有提交，上游更新自动合并）" if mode == "manual" else "镜像（严格跟随上游，不留 fork 自有提交）"
         log_event(db, repo_id, "check", f"{repo['full_name']} 同步方式切换为{label}")
@@ -496,6 +552,65 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
                            "notice": f"{repo['full_name']} {label}"})
         return RedirectResponse(f"/repos?{query}#repo-{repo_id}", status_code=302)
     return RedirectResponse(f"/repos/{repo_id}" if action != "remove" else "/repos", status_code=302)
+
+
+@app.post("/repos/{repo_id}/protection")
+def repo_protection(request: Request, repo_id: int, csrf: str = Form(""),
+                    protection_mode: str = Form("inherit"), max_files: str = Form(""),
+                    max_percent: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    if not db.one("SELECT id FROM repositories WHERE id=?", (repo_id,)):
+        return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    try:
+        if protection_mode not in ("inherit", "on", "off"):
+            raise ValueError("请选择有效的保护开关")
+        count, percent = parse_limits(max_files if max_files else 100,
+                                      max_percent if max_percent else 50)
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    enabled = {"inherit": None, "on": 1, "off": 0}[protection_mode]
+    db.run("UPDATE repositories SET deletion_protection=?, deletion_max_files=?, "
+           "deletion_max_percent=?, deletion_approval=NULL, updated_at=? WHERE id=?",
+           (enabled, count if max_files else None, percent if max_percent else None, utcnow(), repo_id))
+    log_event(db, repo_id, "check", "已修改异常删除保护，未使用的单次确认已失效")
+    worker.request_sync()
+    return RedirectResponse(f"/repos/{repo_id}?notice=保护设置已保存", status_code=302)
+
+
+@app.post("/repos/{repo_id}/confirm-deletion")
+def confirm_deletion(request: Request, repo_id: int, csrf: str = Form(""),
+                     review: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+    if not repo:
+        return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    snapshot = load_review(repo)
+    identity = {"fork_sha": repo["fork_sha"], "target_sha": repo["upstream_sha"],
+                "upstream": repo["upstream_full_name"], "mode": repo["mode"], "branch": repo["branch"]}
+    if (not snapshot or snapshot.get("error") or not snapshot.get("reasons")
+            or snapshot.get("identity") != identity or snapshot.get("policy") != deletion_policy(db, repo)
+            or not repo["enabled"] or repo["status"] != "needs_attention"
+            or not re.fullmatch(r"[a-f0-9]{64}", review)
+            or not hmac.compare_digest(review_token(snapshot), review)):
+        return JSONResponse({"error": "检测结果已变化、未完成或仓库已暂停，请重新检查后确认"}, status_code=409)
+    changed = db.run("UPDATE repositories SET deletion_approval=?, sync_requested=1, updated_at=? "
+                     "WHERE id=? AND deletion_review=? AND enabled=1 AND status='needs_attention'",
+                     (review, utcnow(), repo_id, repo["deletion_review"])).rowcount
+    if not changed:
+        return JSONResponse({"error": "检测结果已变化，请刷新后确认"}, status_code=409)
+    log_event(db, repo_id, "check", f"已确认此次变更：{identity['target_sha']}；仅允许一次，执行前重新核验")
+    worker.request_sync()
+    return RedirectResponse(f"/repos/{repo_id}?notice=已确认此目标提交，等待同步前复核", status_code=302)
 
 
 @app.post("/repos/{repo_id}/{action}")
@@ -576,6 +691,7 @@ def settings_page(request: Request):
                   app_slug=db.get_setting("github_app_slug"),
                   installation_id=db.get_setting("github_installation_id"),
                   auth_error=db.get_setting("auth_error", ""),
+                  protection=deletion_policy(db),
                   notice=request.query_params.get("notice", ""))
 
 
@@ -602,6 +718,30 @@ def settings_save(request: Request, csrf: str = Form(""),
     db.set_setting("auto_discover", "1" if auto_discover == "1" else "0")
     worker.request_sync()
     return RedirectResponse("/settings?notice=设置已保存", status_code=302)
+
+
+@app.post("/settings/deletion-protection")
+def settings_protection(request: Request, csrf: str = Form(""), enabled: str = Form("0"),
+                        max_files: str = Form(""), max_percent: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    try:
+        if enabled not in ("0", "1"):
+            raise ValueError("请选择有效的保护开关")
+        count, percent = parse_limits(max_files, max_percent)
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    for key, value in (("deletion_protection", enabled), ("deletion_max_files", count),
+                       ("deletion_max_percent", percent)):
+        db.set_setting(key, value)
+    db.run("UPDATE repositories SET deletion_approval=NULL")
+    log_event(db, None, "check", "已修改系统异常删除保护，未使用的单次确认已失效")
+    worker.request_sync()
+    return RedirectResponse("/settings?notice=删除保护设置已保存#protection", status_code=302)
 
 
 @app.post("/settings/password", response_class=HTMLResponse)

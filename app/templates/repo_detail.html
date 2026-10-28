@@ -6,7 +6,34 @@
 {% block page_title %}{{ repo.full_name }}{% endblock %}
 {% block header_actions %}{{ status(repo.status) }}{% endblock %}
 {% block content %}
+    {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
     <a class="back-link" href="/repos">{{ icon("chevron-right") }}返回仓库列表</a>
+    {% if deletion_review and (deletion_review.reasons or deletion_review.error) %}
+    <section class="card deletion-review" aria-labelledby="deletion-review-title">
+      <h2 id="deletion-review-title">异常删除保护 · 需关注</h2>
+      <p>已保留 fork 当前内容，未执行此次同步。</p>
+      {% if deletion_review.error %}
+      <p class="notice warn" role="alert">检测未完成：{{ deletion_review.error }}。修复后点「立即同步」重新检查；检测失败不能确认放行。</p>
+      {% else %}
+      <p class="notice warn">{{ deletion_review.reasons | join('；') }}</p>
+      <dl class="kv">
+        <dt>删除文件</dt><dd>{{ deletion_review.deleted_files }} / {{ deletion_review.current_files }}（{{ '%.1f' | format(deletion_review.deleted_percent) }}%）</dd>
+        <dt>上游剩余</dt><dd>{{ deletion_review.target_files }} 个文件</dd>
+      </dl>
+      {% endif %}
+      <dl class="kv">
+        <dt>目标提交</dt><dd><a class="mono" href="https://github.com/{{ deletion_review.identity.upstream }}/commit/{{ deletion_review.identity.target_sha }}" target="_blank" rel="noopener">{{ deletion_review.identity.target_sha }}</a></dd>
+        <dt>检测基线</dt><dd class="mono">{{ deletion_review.identity.fork_sha }}</dd>
+      </dl>
+      {% if can_confirm_deletion %}
+      <form method="post" action="/repos/{{ repo.id }}/confirm-deletion" class="confirm" data-confirm="这会同步已检测到的删除，可能清空 fork 内容。仅确认当前目标提交，不能撤销此次同步。确认继续？">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ deletion_token }}">
+        <button class="danger">确认并同步此次变更</button>
+      </form>
+      <p class="field-help">确认仅使用一次。目标提交、fork 基线、分支、模式或保护规则变化后需重新确认；「立即同步」和「恢复」不会跳过保护。</p>
+      {% elif not deletion_review.error %}<p class="field-help">先恢复仓库并重新检查，再确认最新结果。</p>{% endif %}
+    </section>
+    {% endif %}
     <section class="card repo-sync-bar" aria-labelledby="repo-sync-title">
       <div><h2 id="repo-sync-title">上游同步{{ status(repo.status) }}</h2><p class="muted">{{ '已暂停，不再检查上游；GitHub Actions 不受影响。' if not repo.enabled or repo.status == 'paused' else '自动检查上游，有更新就尝试同步。' }}</p></div>
       <div class="actions">
@@ -61,6 +88,24 @@
           <button class="danger">移除管理</button></form>
       </div>
       </details>
+    </section>
+    <section class="card" aria-labelledby="repo-protection-title">
+      <h2 id="repo-protection-title">异常删除保护</h2>
+      <p class="field-help">当前{{ '开启' if protection.enabled else '关闭' }}；删除超过 {{ protection.max_files }} 个文件或 {{ '%g' | format(protection.max_percent) }}% 时拦截。开启时始终拦截空文件树和检测失败。</p>
+      <form method="post" action="/repos/{{ repo.id }}/protection" class="protection-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label for="repo-protection-mode">保护开关<select id="repo-protection-mode" name="protection_mode">
+          <option value="inherit" {% if repo.deletion_protection is none %}selected{% endif %}>跟随系统</option>
+          <option value="on" {% if repo.deletion_protection == 1 %}selected{% endif %}>此仓库开启</option>
+          <option value="off" {% if repo.deletion_protection == 0 %}selected{% endif %}>此仓库关闭（有内容丢失风险）</option>
+        </select></label>
+        <div class="protection-limits">
+          <label for="repo-max-files">删除文件数阈值<input id="repo-max-files" type="number" name="max_files" min="0" max="1000000" step="1" value="{{ repo.deletion_max_files if repo.deletion_max_files is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
+          <label for="repo-max-percent">删除比例阈值（%）<input id="repo-max-percent" type="number" name="max_percent" min="0" max="100" step="any" value="{{ repo.deletion_max_percent if repo.deletion_max_percent is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
+        </div>
+        <p id="repo-protection-help" class="field-help">阈值留空即跟随系统。镜像按 fork 当前文件计数；手工合并按共同祖先核实删除，不计 fork 独有文件。重命名按旧路径删除计数。关闭将允许空树和大量删除。</p>
+        <button class="secondary">保存此仓库保护</button>
+      </form>
     </section>
     <section class="card">
       <h2>事件历史</h2>

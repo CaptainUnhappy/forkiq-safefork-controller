@@ -260,6 +260,13 @@ button.resume-button { color: var(--primary); border-color: var(--primary); back
 .password-disclosure .icon { width: 17px; height: 17px; margin: 0 5px; }
 .password-form { margin-top: 20px; max-width: 400px; }
 .password-form > label { margin-bottom: 16px; }
+.protection-form { max-width: 600px; }
+.protection-form select { display: block; width: 100%; min-height: 42px; margin-top: 7px; padding: 9px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.protection-limits { display: flex; flex-wrap: wrap; gap: 16px; margin: 18px 0; }
+.protection-limits > label { flex: 1 1 180px; min-width: 0; }
+.deletion-review .mono { overflow-wrap: anywhere; }
+.deletion-review > p { margin-bottom: 16px; }
+.deletion-review .field-help { margin-top: 12px; }
 
 /* Keep forms native, labeled and comfortably usable on touch screens. */
 label { display: block; font-size: 13px; font-weight: 500; color: var(--ink); }

@@ -31,7 +31,11 @@
             {% if app_slug and installation_id %}
               <a class="secondary link" href="https://github.com/settings/installations/{{ installation_id }}" target="_blank" rel="noopener">管理仓库授权{{ icon('arrow-right') }}</a>
               <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">重新检测连接</button></form>
-            {% else %}<a class="primary link" href="/github/connect">{{ '继续安装授权' if app_slug else '连接 GitHub' }}{{ icon('arrow-right') }}</a>{% endif %}
+            {% elif app_slug %}
+              <a class="secondary link" href="https://github.com/apps/{{ app_slug }}/installations/new" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
+              <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">已授权，检测连接</button></form>
+              <a class="secondary link" href="/github/connect">查看连接步骤</a>
+            {% else %}<a class="primary link" href="/github/connect">连接 GitHub{{ icon('arrow-right') }}</a>{% endif %}
           </div>
           {% if app_slug %}
           <details class="settings-disclosure disconnect">
@@ -69,6 +73,23 @@
               <p>检查间隔不是完成时限。网络、限流或冲突可能延后同步；普通错误约 10 分钟后重试，权限和冲突需按提示处理。</p>
             </div>
           </details>
+        </div>
+      </section>
+
+      <section class="settings-section" id="protection" aria-labelledby="protection-title">
+        <div class="settings-heading"><h2 id="protection-title">异常删除保护</h2><p>同步前先保留可疑变更，等待确认。</p></div>
+        <div class="settings-body">
+          <form method="post" action="/settings/deletion-protection" class="protection-form">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <label class="check" for="deletion-protection"><input id="deletion-protection" type="checkbox" name="enabled" value="1" {% if protection.enabled %}checked{% endif %} aria-describedby="protection-help">启用异常删除保护</label>
+            <div class="protection-limits">
+              <label for="deletion-max-files">删除文件数阈值<input id="deletion-max-files" type="number" name="max_files" value="{{ protection.max_files }}" min="0" max="1000000" step="1" required></label>
+              <label for="deletion-max-percent">删除比例阈值（%）<input id="deletion-max-percent" type="number" name="max_percent" value="{{ protection.max_percent }}" min="0" max="100" step="any" required></label>
+            </div>
+            <p id="protection-help" class="field-help">任一阈值被超过即拦截，比例以 fork 当前文件数为分母。空文件树始终拦截；无法完成检测也不更新。适用于镜像快进、强制对齐和手工合并，仓库详情可单独覆盖。</p>
+            <p class="field-help">默认开启：超过 100 个或 50%。拦截后到仓库详情查看删除量及目标提交，必要时「确认并同步此次变更」。关闭保护有内容丢失风险。</p>
+            <button class="primary">保存删除保护</button>
+          </form>
         </div>
       </section>
 

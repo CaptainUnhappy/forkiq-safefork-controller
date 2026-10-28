@@ -3,9 +3,10 @@
 {% block auth_title %}连接 GitHub App{% endblock %}
 {% block auth_description %}<p class="auth-description">通过专用 App 授权，无需提供 GitHub 账号密码。</p>{% endblock %}
 {% block auth_content %}
+{% if detect_error %}<div class="notice warn" role="alert">{{ detect_error }}</div>{% endif %}
 {% if app_slug and installation_id %}
-  {% if auth_error %}
-  <div class="notice warn" role="alert"><strong>{{ app_slug }} · 连接异常</strong><br>{{ auth_error }}</div>
+  {% if auth_error or detect_error %}
+  <div class="notice warn" role="alert"><strong>{{ app_slug }} · 连接异常</strong>{% if auth_error %}<br>{{ auth_error }}{% endif %}</div>
   <p class="field-help">先在 GitHub 检查 App 安装与仓库授权，再返回检测。</p>
   <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary auth-submit">重新检测连接{{ icon('refresh-cw') }}</button></form>
   {% else %}
@@ -22,6 +23,10 @@
     <button class="primary auth-submit">已授权，检测连接{{ icon('refresh-cw') }}</button>
   </form>
 {% else %}
+  {% if config_error %}
+  <div class="notice warn" role="alert">{{ config_error }}</div>
+  <p class="field-help">地址必须指向当前实例。配置完成后刷新本页，再创建 App。</p>
+  {% else %}
   <ol class="connect-steps">
     <li>在 GitHub 创建专用 App，权限已预填。</li>
     <li>安装到你的账号，选择 All repositories。</li>
@@ -32,6 +37,7 @@
     <button class="primary auth-submit" type="submit">在 GitHub 上创建 App{{ icon('arrow-right') }}</button>
   </form>
   <p class="auth-footnote">创建后 GitHub 会自动跳回面板。授权包含 Contents、Workflows、Actions、Administration 与 Metadata。</p>
+  {% endif %}
 {% endif %}
 <a class="auth-back" href="/">返回概览</a>
 {% endblock %}

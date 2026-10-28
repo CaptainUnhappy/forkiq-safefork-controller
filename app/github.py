@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import re
 import ssl
 import time
 import urllib.error
@@ -12,6 +13,7 @@ import jwt
 
 API = "https://api.github.com"
 GRAPHQL = "https://api.github.com/graphql"
+GIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 class RateLimited(RuntimeError):
@@ -144,6 +146,58 @@ class GitHub:
             raise RefNotFound(f"{full_name} 没有分支 {branch}")
         return payload["object"]["sha"]
 
+    def file_paths(self, full_name, commit_sha):
+        """Read a complete file tree for an immutable commit; never use partial data."""
+        if not isinstance(commit_sha, str) or not GIT_SHA.fullmatch(commit_sha):
+            raise ValueError("File-tree detection requires a full commit SHA")
+        commit_sha = commit_sha.lower()
+
+        def invalid(reason):
+            return RuntimeError(f"文件树检测失败 {full_name}@{commit_sha[:12]}：{reason}")
+
+        def read(path):
+            try:
+                return self._api("GET", path)[1]
+            except (AuthError, RateLimited):
+                raise
+            except Exception as error:
+                raise invalid(str(error)) from error
+
+        commit = read(f"/repos/{full_name}/git/commits/{commit_sha}")
+        if not isinstance(commit, dict) or commit.get("sha") != commit_sha:
+            raise invalid("提交响应缺失或 SHA 不匹配")
+        tree = commit.get("tree")
+        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
+        if not isinstance(tree_sha, str) or not GIT_SHA.fullmatch(tree_sha):
+            raise invalid("提交缺少有效的文件树 SHA")
+        payload = read(f"/repos/{full_name}/git/trees/{tree_sha}?recursive=1")
+        if not isinstance(payload, dict) or payload.get("sha") != tree_sha:
+            raise invalid("文件树响应缺失或 SHA 不匹配")
+        if payload.get("truncated") is not False:
+            raise invalid("文件树被截断或未声明完整，无法安全计算删除数量")
+        entries = payload.get("tree")
+        if not isinstance(entries, list):
+            raise invalid("文件树条目不是列表")
+        kinds = {}
+        modes = {"blob": {"100644", "100755", "120000"}, "tree": {"040000"}, "commit": {"160000"}}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise invalid("文件树条目无效")
+            path, kind, sha = entry.get("path"), entry.get("type"), entry.get("sha")
+            if (not isinstance(path, str) or not path or "\x00" in path
+                    or any(part in ("", ".", "..") for part in path.split("/"))):
+                raise invalid("文件树路径无效")
+            if (path in kinds or not isinstance(kind, str) or kind not in modes
+                    or not isinstance(entry.get("mode"), str) or entry["mode"] not in modes[kind]
+                    or not isinstance(sha, str) or not GIT_SHA.fullmatch(sha)):
+                raise invalid("文件树包含重复路径、未知类型或不完整条目")
+            kinds[path] = kind
+        for path in kinds:
+            parts = path.split("/")
+            if any(kinds.get("/".join(parts[:index])) != "tree" for index in range(1, len(parts))):
+                raise invalid("递归文件树缺少父目录")
+        return {path for path, kind in kinds.items() if kind in ("blob", "commit")}
+
     def update_ref(self, full_name, branch, sha, force=False):
         status, payload, _ = self._request(
             "PATCH", f"{API}/repos/{full_name}/git/refs/heads/{branch}",
@@ -190,6 +244,34 @@ class GitHub:
                 raise Forbidden(message[:300])
             raise MergeConflict(message[:200])
         raise RuntimeError(f"merge_upstream {full_name} -> {status}: {str(payload)[:300]}")
+
+    def merge_commit(self, full_name, branch, target_sha):
+        """Merge the reviewed commit, not an upstream branch that may have moved."""
+        if not isinstance(target_sha, str) or not GIT_SHA.fullmatch(target_sha):
+            raise ValueError("Merge requires a full target commit SHA")
+        target_sha = target_sha.lower()
+        status, payload, _ = self._request(
+            "POST", f"{API}/repos/{full_name}/merges",
+            {"Authorization": f"token {self.installation_token()}",
+             "Accept": "application/vnd.github+json"}, {"base": branch, "head": target_sha})
+        if status == 201:
+            sha = payload.get("sha") if isinstance(payload, dict) else None
+            if not isinstance(sha, str) or not GIT_SHA.fullmatch(sha):
+                raise RuntimeError(f"merge_commit {full_name} -> 201: response has no valid commit SHA")
+            return {**payload, "merge_type": "fast-forward" if sha == target_sha else "merge"}
+        if status == 204:
+            return {"merge_type": "none"}
+        message = str(payload.get("message", payload) if isinstance(payload, dict) else payload)
+        if status == 429 or (status in (401, 403) and "rate limit" in message.lower()):
+            raise RateLimited(message[:200])
+        if status == 401:
+            self.reset_token()
+            raise AuthError(f"认证失败: {status} {message[:200]}")
+        if status == 403 or (status == 422 and "workflow" in message.lower()):
+            raise Forbidden(message[:300])
+        if status in (409, 422):
+            raise MergeConflict(message[:200])
+        raise RuntimeError(f"merge_commit {full_name} -> {status}: {str(payload)[:300]}")
 
     def compare(self, fork_full, base, head):
         status, payload = self._api(

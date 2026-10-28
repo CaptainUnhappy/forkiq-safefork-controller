@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS repositories(
   discovered INTEGER NOT NULL DEFAULT 0,
   is_archived INTEGER NOT NULL DEFAULT 0,
   sync_requested INTEGER NOT NULL DEFAULT 0,
+  deletion_protection INTEGER,
+  deletion_max_files INTEGER,
+  deletion_max_percent REAL,
+  deletion_review TEXT,
+  deletion_approval TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -116,6 +121,12 @@ class DB:
             conn.execute("ALTER TABLE repositories ADD COLUMN upstream_ahead INTEGER")
         if "fork_ahead" not in columns:
             conn.execute("ALTER TABLE repositories ADD COLUMN fork_ahead INTEGER")
+        for name, kind in (("deletion_protection", "INTEGER"),
+                           ("deletion_max_files", "INTEGER"),
+                           ("deletion_max_percent", "REAL"),
+                           ("deletion_review", "TEXT"), ("deletion_approval", "TEXT")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE repositories ADD COLUMN {name} {kind}")
         conn.commit()
 
     def run(self, sql, params=()):

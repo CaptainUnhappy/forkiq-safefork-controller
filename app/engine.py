@@ -10,6 +10,8 @@ from pathlib import Path
 from .db import DB, log_event, insert_repository, utcnow
 from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConflict,
                      RateLimited, RefNotFastForward, RefNotFound, RefObjectNotFound)
+from .protection import (assess_change, change_identity, deletion_policy, load_review,
+                         review_json, review_token, valid_comparison)
 
 BATCH = 50
 ERROR_RETRY_SECONDS = 600
@@ -496,15 +498,74 @@ def _self_update(db, client, row, now, forced):
               f"{row['full_name']} 自身 workflow「{target['name']}」超过 24 小时未运行，已触发自更新")
 
 
+def _deletion_guard(db, client, row, fork_sha, target_sha, comparison=None):
+    """No write is allowed without a complete review or an exact one-use approval."""
+    live = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+    if not live or not live["enabled"] or live["status"] == "paused":
+        return False
+    fatal = None
+    try:
+        policy = deletion_policy(db, live)
+        if any(live[key] != row[key] for key in ("mode", "branch", "upstream_full_name")):
+            raise RuntimeError("同步配置已变化，请重新检查后再同步")
+        if not policy["enabled"]:
+            _set_repo(db, row["id"], deletion_review=None, deletion_approval=None)
+            return True
+        if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
+            raise RuntimeError("fork HEAD 已变化，请重新检查后再同步")
+        review = assess_change(client, row, fork_sha, target_sha, policy,
+                               previous=load_review(live), comparison=comparison)
+        if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
+            raise RuntimeError("检测期间 fork HEAD 已变化，请重新检查后再同步")
+        latest = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
+        if not latest or not latest["enabled"] or latest["status"] == "paused":
+            return False
+        if (deletion_policy(db, latest) != policy or
+                any(latest[key] != row[key] for key in ("mode", "branch", "upstream_full_name"))):
+            raise RuntimeError("检测期间保护或同步配置已变化，请重新检查")
+    except Exception as error:
+        review = {"identity": change_identity(row, fork_sha, target_sha),
+                  "error": str(error)[:500], "reasons": []}
+        if isinstance(error, (RateLimited, AuthError)):
+            fatal = error
+    serialized = review_json(review)
+    if not review["error"] and not review["reasons"]:
+        _set_repo(db, row["id"], deletion_review=serialized, deletion_approval=None)
+        return True
+    if not review["error"]:
+        token = review_token(review)
+        consumed = db.run("UPDATE repositories SET deletion_approval=NULL WHERE id=? "
+                          "AND deletion_approval=? AND deletion_review=? AND enabled=1 "
+                          "AND status<>'paused'", (row["id"], token, serialized)).rowcount
+        if consumed:
+            log_event(db, row["id"], "check",
+                      f"{row['full_name']} 已使用一次性确认：目标 {target_sha}，"
+                      f"删除 {review['deleted_files']} 个文件（{review['deleted_percent']:.1f}%）")
+            return True
+    reason = (f"检测未完成：{review['error']}" if review["error"] else
+              "；".join(review["reasons"]) +
+              f"；删除 {review['deleted_files']} / {review['current_files']} 个文件"
+              f"（{review['deleted_percent']:.1f}%）")
+    message = f"异常删除保护：{reason}。已保留 fork，目标 {target_sha}；请在仓库详情检查。"
+    if live["last_error"] != message or live["status"] != "needs_attention":
+        log_event(db, row["id"], "blocked", f"{row['full_name']} {message}")
+    _set_repo(db, row["id"], status="needs_attention", fork_sha=fork_sha,
+              upstream_sha=target_sha, last_check_at=utcnow(), last_error=message,
+              deletion_review=serialized, deletion_approval=None)
+    if fatal:
+        raise fatal
+    return False
+
+
 def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forced,
                  version=None):
     """Manual-fork mode: keep fork-unique commits, merge upstream in (Sync fork).
 
     Unlike mirror mode this never marks diverged: commits produced in the fork
     (its own Actions, local edits) are preserved, and upstream advances are
-    folded in with a server-side merge. merge-upstream sources the upstream
-    branch with the *same name* as the fork's default branch, so that is the
-    ref the caller tracks. A compare probe first tells apart "already contains
+    folded in with a server-side merge of the exact reviewed commit. The caller
+    tracks the upstream branch with the same name as the fork's default branch.
+    A compare probe first tells apart "already contains
     upstream" (record and stay quiet) from real work.
     """
     repo_id = row["id"]
@@ -519,7 +580,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                           f"{row['full_name']} 已与上游一致（保留自有提交）")
             _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
                       last_merged_upstream_sha=upstream_sha, last_check_at=now,
-                      last_success_at=now, last_error=None, **version)
+                      last_success_at=now, last_error=None,
+                      deletion_review=None, deletion_approval=None, **version)
             return "synced"
         if (row["status"] == "synced" and fork_sha == row["fork_sha"]
                 and upstream_sha == row["last_merged_upstream_sha"]):
@@ -530,23 +592,23 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                 version = {**version, **_probe_counts(db, client, row, fork_branch)}
             _set_repo(db, repo_id, last_check_at=now, **version)
             return "synced"
-    if row["status"] == "needs_attention" and not forced and not _merge_retry_due(row):
+    if (row["status"] == "needs_attention" and not row["deletion_review"]
+            and not forced and not _merge_retry_due(row)):
         return "needs_attention"
     if (row["status"] == "diverged" and not forced
             and row["diverged_upstream_sha"] == upstream_sha):
         # Conflict is sticky until upstream advances or the user intervenes.
         _set_repo(db, repo_id, last_check_at=now, fork_sha=fork_sha, **version)
         return "diverged"
-    head = f"{row['upstream_full_name'].split('/')[0]}:{fork_branch}"
     try:
-        payload = client.compare(row["full_name"], fork_branch, head)
+        payload = client.compare(row["full_name"], fork_sha, upstream_sha)
     except (RateLimited, AuthError):
         raise
     except Exception:
         payload = "probe-failed"
-    counts = _count_fields(payload)
+    counts = _count_fields(payload) if valid_comparison(payload) else {}
     version = {**version, **counts}
-    if isinstance(payload, dict) and payload.get("ahead_by", 0) == 0:
+    if valid_comparison(payload) and payload["ahead_by"] == 0:
         # Fork already contains the upstream head (its own commits sit on top,
         # or a merge raced ahead of us); record the marker without another merge.
         if row["status"] != "synced":
@@ -554,12 +616,18 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                       f"{row['full_name']} 已包含上游 {upstream_sha[:12]}（保留自有提交）")
         _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
                   last_merged_upstream_sha=upstream_sha, last_check_at=utcnow(),
-                  last_success_at=utcnow(), last_error=None, **version)
+                  last_success_at=utcnow(), last_error=None,
+                  deletion_review=None, deletion_approval=None, **version)
         return "synced"
+    if not _deletion_guard(db, client, row, fork_sha, upstream_sha,
+                           comparison=payload if isinstance(payload, dict) else "unavailable"):
+        return "needs_attention"
     try:
-        result = client.merge_upstream(row["full_name"], fork_branch)
+        result = client.merge_commit(row["full_name"], fork_branch, upstream_sha)
         confirmed = client.get_ref(row["full_name"], fork_branch)
         merge_type = (result or {}).get("merge_type")
+        if merge_type != "none" and confirmed != (result or {}).get("sha"):
+            raise RuntimeError("合并后 fork HEAD 与 GitHub 返回的目标合并提交不一致")
         if merge_type == "none":
             label = "已包含"
         elif merge_type == "fast-forward":
@@ -573,7 +641,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                        "fork_ahead": counts["fork_ahead"] + (1 if merge_type == "merge" else 0)}
         _set_repo(db, repo_id, status="synced", fork_sha=confirmed, upstream_sha=upstream_sha,
                   last_merged_upstream_sha=upstream_sha, last_check_at=utcnow(),
-                  last_success_at=utcnow(), last_error=None, **version)
+                  last_success_at=utcnow(), last_error=None,
+                  deletion_review=None, deletion_approval=None, **version)
         log_event(db, repo_id, "synced",
                   f"{row['full_name']} {label}上游 {upstream_sha[:12]}（保留 fork 自有提交）")
         return "synced"
@@ -650,12 +719,14 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
     return "error"
 
 
-def _update_mirror_ref(client, row, upstream_sha):
+def _update_mirror_ref(client, row, upstream_sha, fork_sha):
     """Only a confirmed non-fast-forward permits the mirror's force update."""
     try:
         client.update_ref(row["full_name"], row["branch"], upstream_sha)
         return False
     except RefNotFastForward:
+        if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
+            raise RuntimeError("fork HEAD 在强制对齐前已变化，已取消本次同步，请重新检查")
         client.update_ref(row["full_name"], row["branch"], upstream_sha, force=True)
         return True
 
@@ -750,7 +821,7 @@ def sync_one(db, client, row, node, forced=False):
         status = _sync_manual(db, client, row, fork_branch,
                               fork_ref["target"]["oid"], upstream_sha, utcnow(), forced,
                               version=version)
-        if row["self_update_interval"]:
+        if row["self_update_interval"] and status != "needs_attention":
             _self_update(db, client, row, utcnow(), forced)
         return status
     if fork_branch != row["branch"] or parent_branch != row["branch"]:
@@ -776,12 +847,15 @@ def sync_one(db, client, row, node, forced=False):
             log_event(db, repo_id, "synced", f"{row['full_name']} 已与上游一致")
         _set_repo(db, repo_id, status="synced", fork_sha=fork_sha, upstream_sha=upstream_sha,
                   upstream_ahead=0, fork_ahead=0,
-                  last_check_at=now, last_success_at=now, last_error=None, **version)
+                  last_check_at=now, last_success_at=now, last_error=None,
+                  deletion_review=None, deletion_approval=None, **version)
         return "synced"
+    if not _deletion_guard(db, client, row, fork_sha, upstream_sha):
+        return "needs_attention"
     try:
         recovered_object = False
         try:
-            force_aligned = _update_mirror_ref(client, row, upstream_sha)
+            force_aligned = _update_mirror_ref(client, row, upstream_sha, fork_sha)
         except RefObjectNotFound:
             # The batched observation may be stale; refresh once, without
             # treating an unavailable object as permission to force a ref.
@@ -790,7 +864,9 @@ def sync_one(db, client, row, node, forced=False):
                 version = {"fork_tag": None, "upstream_tag": None,
                            "fork_commit_at": None, "upstream_commit_at": None}
             upstream_sha = refreshed_sha
-            force_aligned = _update_mirror_ref(client, row, upstream_sha)
+            if not _deletion_guard(db, client, row, fork_sha, upstream_sha):
+                return "needs_attention"
+            force_aligned = _update_mirror_ref(client, row, upstream_sha, fork_sha)
             recovered_object = True
         confirmed = client.get_ref(row["full_name"], row["branch"])
         if confirmed != upstream_sha:
@@ -799,6 +875,7 @@ def sync_one(db, client, row, node, forced=False):
         _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
                   upstream_ahead=0, fork_ahead=0,
                   last_check_at=utcnow(), last_success_at=utcnow(), last_error=None,
+                  deletion_review=None, deletion_approval=None,
                   **aligned_fields, **version)
         if force_aligned:
             message = (f"{row['full_name']} 已强制对齐到上游 {upstream_sha[:12]}"
