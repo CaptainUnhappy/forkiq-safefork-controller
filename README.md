@@ -149,6 +149,10 @@ node --test tests/test_ui.js                                    # 前端脚本
 - 密码用 scrypt 加盐哈希；所有写操作校验 CSRF；会话 7 天过期。
 - 上游被删除、改名、默认分支不一致时一律停止自动推送并提示，不猜也不覆盖。
 
+## Infrastructure Partners
+
+Test runners, the public demo instance and the release mirror are hosted on servers provided by [BlueServers](https://blueservers.com/) through its social support program.
+
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
