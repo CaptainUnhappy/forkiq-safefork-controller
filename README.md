@@ -151,7 +151,7 @@ node --test tests/test_ui.js                                    # 前端脚本
 
 ## Infrastructure Partners
 
-Test runners, the public demo instance and the release mirror are hosted on servers provided by [BlueServers](https://blueservers.com/) through its social support program.
+Test runners and the release mirror run on servers provided by [BlueServers](https://blueservers.com/) through its social support program.
 
 ## 许可
 
