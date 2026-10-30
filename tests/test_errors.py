@@ -10,7 +10,7 @@ class ErrorGuidanceTests(unittest.TestCase):
         new = "GitHub HTTP 422: Object does not exist"
         self.assertEqual(error_guidance(old), error_guidance(new))
         self.assertIn("未完成", error_guidance(old)["summary"])
-        self.assertIn("重试一次", error_guidance(old)["action"])
+        self.assertIn("不会强推", error_guidance(old)["action"])
 
     def test_permissions_are_actionable_not_promised_to_self_heal(self):
         for message, expected in (("App 缺 Workflows 权限", "批准"),
@@ -24,7 +24,7 @@ class ErrorGuidanceTests(unittest.TestCase):
         for message in ("GitHub GET /repos/me/demo -> 502: Bad Gateway", "HTTP 503",
                         "{'status': '504'}", "<urlopen error timed out>"):
             with self.subTest(message=message):
-                self.assertIn("自动重试", error_guidance(message)["action"])
+                self.assertIn("不会自动重试", error_guidance(message)["action"])
 
     def test_rate_limiting_does_not_encourage_repeated_requests(self):
         self.assertIn("不会加快", error_guidance("API rate limit exceeded")["action"])

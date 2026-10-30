@@ -1,114 +1,32 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon %}
 {% set active_page = "settings" %}
-{% set page_icon = "settings-2" %}
-{% block title %}ForkIQ · 系统设置{% endblock %}
+{% block title %}ForkIQ · 设置{% endblock %}
 {% block page_title %}系统设置{% endblock %}
 {% block content %}
-    {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
-    {% if auth_error %}<div class="notice warn" role="alert">GitHub 认证异常：{{ auth_error }} · <a href="/github/connect">检查连接</a></div>{% endif %}
-    <section class="sync-flow" aria-labelledby="flow-title">
-      <h2 id="flow-title">同步如何运行</h2>
-      <ol>
-        <li><a href="#connection">连接 GitHub</a><span>授权要管理的仓库</span></li>
-        <li><a href="/repos">加入 fork</a><span>自动发现，或粘贴仓库链接</span></li>
-        <li><a href="#sync">自动同步</a><span>检查上游，有更新就尝试同步</span></li>
-      </ol>
-      <p>不想同步某个仓库？在<a href="/repos">仓库管理</a>点「暂停」，随时可以恢复。</p>
-    </section>
-
-    <div class="settings-sheet">
-      <section class="settings-section" id="connection" aria-labelledby="connection-title">
-        <div class="settings-heading"><h2 id="connection-title">GitHub 连接</h2><p>只需连接一次，使用已有 App。</p></div>
-        <div class="settings-body">
-          <div class="connection-status">
-            {% if app_slug and installation_id %}
-              <span class="badge {{ 'kind-auth' if auth_error else 's-synced' }}">{{ '需要处理' if auth_error else '已连接' }}</span><strong>{{ app_slug }}</strong>
-            {% elif app_slug %}<span class="badge kind-auth">待安装授权</span><strong>{{ app_slug }}</strong>
-            {% else %}<span class="badge">未连接</span>{% endif %}
-          </div>
-          <div class="actions">
-            {% if app_slug and installation_id %}
-              <a class="secondary link" href="https://github.com/settings/installations/{{ installation_id }}" target="_blank" rel="noopener">管理仓库授权{{ icon('arrow-right') }}</a>
-              <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">重新检测连接</button></form>
-            {% elif app_slug %}
-              <a class="secondary link" href="https://github.com/apps/{{ app_slug }}/installations/new" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
-              <form method="post" action="/github/detect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">已授权，检测连接</button></form>
-              <a class="secondary link" href="/github/connect">查看连接步骤</a>
-            {% else %}<a class="primary link" href="/github/connect">连接 GitHub{{ icon('arrow-right') }}</a>{% endif %}
-          </div>
-          {% if app_slug %}
-          <details class="settings-disclosure disconnect">
-            <summary>断开连接</summary>
-            <p class="field-help">停止本面板同步，保留仓库配置和 App 凭据；不会卸载 GitHub 上的 App。</p>
-            <form method="post" action="/settings/disconnect" class="confirm" data-confirm="断开后，本面板将停止同步。仓库配置与 App 凭据保留，GitHub 上的 App 不会卸载。确认断开？">
-              <input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">断开 GitHub 连接</button>
-            </form>
-          </details>
-          {% endif %}
-        </div>
-      </section>
-
-      <section class="settings-section" id="sync" aria-labelledby="sync-title">
-        <div class="settings-heading"><h2 id="sync-title">仓库同步</h2><p>检查上游和发现新仓库，是两件事。</p></div>
-        <div class="settings-body">
-          <form method="post" action="/settings" class="sync-settings-form">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <div class="setting-field">
-              <label for="sync-interval">上游检查间隔</label>
-              <div class="input-unit"><input id="sync-interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="0.25" max="5" step="any" required aria-describedby="sync-interval-help"><span>分钟</span></div>
-              <p id="sync-interval-help" class="field-help">每轮检查后等待此间隔（0.25–5 分钟）。仅检查已受管且未暂停的仓库。</p>
-            </div>
-            <div class="setting-field discovery-field">
-              <label class="check" for="auto-discover"><input id="auto-discover" type="checkbox" name="auto_discover" value="1" {% if auto_discover %}checked{% endif %} aria-describedby="discovery-help">自动加入新 fork</label>
-              <p id="discovery-help" class="field-help">每 60 分钟扫描已授权的新 fork，加入后即安排同步。关闭不影响已有仓库。</p>
-            </div>
-            <button class="primary">保存同步设置</button>
-          </form>
-          <details class="settings-disclosure">
-            <summary>发现与同步有什么区别？</summary>
-            <div class="field-help">
-              <p>发现：把已有 fork 加入面板，不会创建 GitHub 仓库。扫描到期后在下一轮执行，加入的仓库在同一轮检查上游。使用「仅选定仓库」授权时，需先在 GitHub 授权新仓库。</p>
-              <p>同步：按上方间隔检查更新，发现更新后尝试同步。不想等自动扫描，可在<a href="/repos">仓库管理</a>点「发现新 fork」或粘贴链接。</p>
-              <p>检查间隔不是完成时限。网络、限流或冲突可能延后同步；普通错误约 10 分钟后重试，权限和冲突需按提示处理。</p>
-            </div>
-          </details>
-        </div>
-      </section>
-
-      <section class="settings-section" id="protection" aria-labelledby="protection-title">
-        <div class="settings-heading"><h2 id="protection-title">异常删除保护</h2><p>同步前先保留可疑变更，等待确认。</p></div>
-        <div class="settings-body">
-          <form method="post" action="/settings/deletion-protection" class="protection-form">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <label class="check" for="deletion-protection"><input id="deletion-protection" type="checkbox" name="enabled" value="1" {% if protection.enabled %}checked{% endif %} aria-describedby="protection-help">启用异常删除保护</label>
-            <div class="protection-limits">
-              <label for="deletion-max-files">删除文件数阈值<input id="deletion-max-files" type="number" name="max_files" value="{{ protection.max_files }}" min="0" max="1000000" step="1" required></label>
-              <label for="deletion-max-percent">删除比例阈值（%）<input id="deletion-max-percent" type="number" name="max_percent" value="{{ protection.max_percent }}" min="0" max="100" step="any" required></label>
-            </div>
-            <p id="protection-help" class="field-help">任一阈值被超过即拦截，比例以 fork 当前文件数为分母。空文件树始终拦截；无法完成检测也不更新。适用于镜像快进、强制对齐和手工合并，仓库详情可单独覆盖。</p>
-            <p class="field-help">服务器备份固定开启：首次检查和每次更新前保存当前提交及其可达历史，每仓库保留最近 3 份不同版本。备份失败不更新，关闭删除保护也不能跳过备份。到仓库详情下载或回滚；回滚后保持暂停。</p>
-            <p class="field-help">默认开启：超过 100 个或 50%。拦截后到仓库详情查看删除量及目标提交，必要时「确认并同步此次变更」。关闭保护有内容丢失风险。</p>
-            <button class="primary">保存删除保护</button>
-          </form>
-        </div>
-      </section>
-
-      <section class="settings-section" id="security" aria-labelledby="security-title">
-        <div class="settings-heading"><h2 id="security-title">账户安全</h2><p>管理本面板的登录密码。</p></div>
-        <div class="settings-body">
-          <details class="settings-disclosure password-disclosure">
-            <summary>{{ icon('shield-check') }}修改管理员密码</summary>
-            <form method="post" action="/settings/password" class="password-form">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <label>当前密码<input type="password" name="current" autocomplete="current-password" required></label>
-              <label>新密码<input type="password" name="password" autocomplete="new-password" minlength="8" required></label>
-              <label>确认新密码<input type="password" name="password2" autocomplete="new-password" minlength="8" required></label>
-              <p class="field-help">至少 8 位。修改后，所有设备需重新登录。</p>
-              <button class="primary">更新密码</button>
-            </form>
-          </details>
-        </div>
-      </section>
-    </div>
+{% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
+<section class="card"><h2>专用 GitHub App</h2>
+  <p>{{ app_slug or '尚未连接' }}{% if installation_id %} · installation {{ installation_id }}{% endif %}</p>
+  <p>只授权选定目标仓库：Contents、Workflows 写入；Actions、Administration、Metadata 只读。私有上游读取凭据须另行挂载。</p>
+  <div class="actions"><a class="secondary link" href="/github/connect">连接与检测</a>
+  <form method="post" action="/settings/disconnect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">断开并暂停所有同步</button></form></div>
+</section>
+<section class="card" id="sync"><h2>检查间隔</h2>
+  <form method="post" action="/settings" class="stacked-form"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="interval">每轮完成后等待（分钟）</label><input id="interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="1" max="1440" step="any" required>
+    <button class="primary">保存间隔</button>
+  </form>
+  <p class="field-help">默认 60 分钟，串行检查已确认启用的仓库。任务时长、网络、限流和停机会造成延迟；不承诺每小时必定成功。不自动发现或接管新仓库。</p>
+</section>
+<section class="card"><h2>历史保护</h2>
+  <p>已有分支只能快进；已有标签不可移动；上游删除引用不传播到备份。来源身份或可见性变化、分叉、空文件树、删除超过 100 个文件或 50% 时停写，需人工审查。</p>
+  <p>控制器不启用 Actions、不执行上游脚本、不提供合并或覆盖回滚。备份目标的 Actions 必须持续关闭，应用开发仓库的 CI 与它分离。</p>
+</section>
+<section class="card"><h2>账户安全</h2>
+  <form method="post" action="/settings/password" class="stacked-form"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>当前密码<input type="password" name="current" autocomplete="current-password" required></label>
+    <label>新密码（至少 12 位）<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+    <label>再次输入<input type="password" name="password2" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+    <button class="primary">更新密码并退出所有会话</button>
+  </form>
+</section>
 {% endblock %}

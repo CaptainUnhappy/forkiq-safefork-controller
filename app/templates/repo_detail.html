@@ -1,138 +1,53 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon, status, event_kind, repo_link, github_link, version_chip, verdict_chip, timestamp, error_message %}
+{% from "components.html" import icon, status, event_kind, repo_link, timestamp %}
 {% set active_page = "repos" %}
-{% set page_icon = "folder-git-2" %}
-{% block title %}ForkIQ · 仓库{% endblock %}
+{% block title %}ForkIQ · SafeFork{% endblock %}
 {% block page_title %}{{ repo.full_name }}{% endblock %}
 {% block header_actions %}{{ status(repo.status) }}{% endblock %}
 {% block content %}
-    {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
-    <a class="back-link" href="/repos">{{ icon("chevron-right") }}返回仓库列表</a>
-    {% if deletion_review and (deletion_review.reasons or deletion_review.error) %}
-    <section class="card deletion-review" aria-labelledby="deletion-review-title">
-      <h2 id="deletion-review-title">异常删除保护 · 需关注</h2>
-      <p>已保留 fork 当前内容，未执行此次同步。</p>
-      {% if deletion_review.error %}
-      <p class="notice warn" role="alert">检测未完成：{{ deletion_review.error }}。修复后点「立即同步」重新检查；检测失败不能确认放行。</p>
-      {% else %}
-      <p class="notice warn">{{ deletion_review.reasons | join('；') }}</p>
-      <dl class="kv">
-        <dt>删除文件</dt><dd>{{ deletion_review.deleted_files }} / {{ deletion_review.current_files }}（{{ '%.1f' | format(deletion_review.deleted_percent) }}%）</dd>
-        <dt>上游剩余</dt><dd>{{ deletion_review.target_files }} 个文件</dd>
-      </dl>
-      {% endif %}
-      <dl class="kv">
-        <dt>目标提交</dt><dd><a class="mono" href="https://github.com/{{ deletion_review.identity.upstream }}/commit/{{ deletion_review.identity.target_sha }}" target="_blank" rel="noopener">{{ deletion_review.identity.target_sha }}</a></dd>
-        <dt>检测基线</dt><dd class="mono">{{ deletion_review.identity.fork_sha }}</dd>
-      </dl>
-      {% if can_confirm_deletion %}
-      <form method="post" action="/repos/{{ repo.id }}/confirm-deletion" class="confirm" data-confirm="这会同步已检测到的删除，可能清空 fork 内容。当前版本已备份，仅放行此目标的一次尝试。确认继续？">
-        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ deletion_token }}">
-        <button class="danger">确认并同步此次变更</button>
-      </form>
-      <p class="field-help">确认仅使用一次。目标提交、fork 基线、分支、模式或保护规则变化后需重新确认；「立即同步」和「恢复」不会跳过保护。</p>
-      {% elif not deletion_review.error %}<p class="field-help">需有当前版本的有效备份，且仓库未暂停，才可确认。请处理备份错误或恢复仓库后重新检查。</p>{% endif %}
-    </section>
+<a class="back-link" href="/repos">返回仓库列表</a>
+{% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
+{% if repo.last_error %}<p id="repo-error" class="notice warn" role="alert">{{ repo.last_error }}</p>{% endif %}
+<section class="card">
+  <h2>安全同步</h2>
+  <p>所有分支仅创建或快进；已有标签和归档不改动。来源变化、冲突或目标 Actions 开启时停止，不能通过重试绕过。</p>
+  <div class="actions">
+    <form method="post" action="/repos/{{ repo.id }}/preview"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">只读预览（暂停写入）</button></form>
+    {% if repo.enabled %}
+    <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">立即安全同步</button></form>
+    <form method="post" action="/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">暂停</button></form>
+    {% elif plan and not repo.review_required %}
+    <form method="post" action="/repos/{{ repo.id }}/resume" class="confirm" data-confirm="按已预览的来源与映射启用同步？每次写入仍会重新核对，目标 Actions 必须保持关闭。"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ review }}"><button class="primary">确认计划并启用同步</button></form>
     {% endif %}
-    <section class="card repo-sync-bar" aria-labelledby="repo-sync-title">
-      <div><h2 id="repo-sync-title">上游同步{{ status(repo.status) }}</h2><p class="muted">{{ '已暂停，不再检查上游；GitHub Actions 不受影响。' if not repo.enabled or repo.status == 'paused' else '自动检查上游，有更新就尝试同步。' }}</p></div>
-      <div class="actions">
-        {% if repo.enabled and repo.status != 'paused' %}
-        <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">{{ icon('refresh-cw') }}立即同步</button></form>
-        <form method="post" action="/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon('pause') }}暂停同步</button></form>
-        {% else %}
-        <form method="post" action="/repos/{{ repo.id }}/resume"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">{{ icon('refresh-cw') }}恢复同步</button></form>
-        <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary" disabled>立即同步</button></form>
-        {% endif %}
-      </div>
-    </section>
-    <section class="card" aria-labelledby="backups-title">
-      <h2 id="backups-title">服务器备份 · 最近 3 份</h2>
-      <p class="field-help">首次检查建立基线，每次真正更新前再备份当前版本；相同提交只保留一份。备份失败不更新，异常删除仍先拦截。</p>
-      {% if repo.restore_backup_id %}<p class="notice warn" role="status">回滚正在排队或执行，同步已暂停。完成后请刷新查看事件结果。</p>{% endif %}
-      {% if backup_error %}<p class="notice warn" role="alert">备份未完成：{{ backup_error.last_error }}。约 10 分钟后重试；期间不更新 fork。</p>{% endif %}
-      {% if backups %}
-      <ul class="backup-list">
-        {% for backup in backups %}
-        <li>
-          <div class="backup-version"><strong class="mono" title="{{ backup.fork_sha }}">{{ backup.fork_sha[:12] }}</strong><span class="muted">{{ timestamp(backup.created_at) }} · {{ '%.1f' | format(backup.size_bytes / 1048576) }} MiB</span><span class="mono backup-sha">{{ backup.fork_sha }}</span></div>
-          <div class="actions"><a class="secondary link" href="/backups/{{ backup.id }}/download">下载备份</a>{% if not repo.restore_backup_id %}<a class="danger link" href="/repos/{{ repo.id }}/backups/{{ backup.id }}/restore">回滚到此版本</a>{% endif %}</div>
-        </li>
-        {% endfor %}
-      </ul>
-      {% else %}<p class="muted">尚无完成的备份。首次检查时自动创建，未积累 3 个不同版本前按实际数量显示。</p>{% endif %}
-      <p class="field-help">备份包含所示提交的文件与全部可达 Git 历史，不含其他分支、Git LFS 实体和子模块内容。回滚会先备份当前版本，再覆盖本仓库「{{ repo.branch }}」分支，随后保持暂停。服务器故障仍需异地备份防护。</p>
-    </section>
-    <section class="card">
-      <h2>仓库详情</h2>
-      <dl class="kv">
-        <dt>仓库</dt><dd>{{ repo_link(repo.full_name) }}</dd>
-        <dt>上游</dt><dd>{{ repo_link(repo.upstream_full_name) }}{% if repo.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</dd>
-        <dt>同步分支</dt><dd>{{ repo.branch }}</dd>
-        <dt>同步方式</dt>
-        <dd>{% if repo.mode == 'manual' %}保留自有提交，自动合并上游更新。
-            {% else %}镜像：与上游对齐，不保留 fork 自有提交。{% endif %}</dd>
-        <dt>自更新保活</dt>
-        <dd>{% if repo.self_update_interval %}{{ repo.self_update or '已开启，等待检查' }}
-            {% else %}未开启{% endif %}</dd>
-        <dt>版本对比</dt><dd>{{ verdict_chip(verdict) }}</dd>
-        <dt>上游版本</dt><dd>{{ version_chip(repo.upstream_sha, repo.upstream_tag, repo.upstream_commit_at, side='上游') }}</dd>
-        <dt>fork 版本</dt><dd>{{ version_chip(repo.fork_sha, repo.fork_tag, repo.fork_commit_at, side='本地', tone=fork_tone) }}</dd>
-        <dt>最近成功</dt><dd>{{ timestamp(repo.last_success_at) }}</dd>
-        <dt>最近检查</dt><dd>{{ timestamp(repo.last_check_at) }}</dd>
-        {% if repo.last_error %}<dt>最近错误</dt><dd id="repo-error" class="err-hint">{{ error_message(repo.last_error) }}</dd>{% endif %}
-        {% if repo.diverged_at %}<dt>分叉于</dt><dd>{{ timestamp(repo.diverged_at) }}（上游 {{ repo.diverged_upstream_sha[:12] if repo.diverged_upstream_sha }}）</dd>{% endif %}
-      </dl>
-      <details class="advanced-actions"><summary>高级操作</summary>
-      <p class="field-help">以下操作会影响 GitHub 仓库或 Actions，不是暂停同步。</p>
-      <div class="actions">
-        <form method="post" action="/repos/{{ repo.id }}/mode" {% if repo.mode == 'manual' %}class="confirm" data-confirm="切换为镜像后，同步会将分支对齐到上游，不再保留 fork 自有提交。确认切换？"{% endif %}>
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="secondary">{{ '切换为镜像模式' if repo.mode == 'manual' else '切换为手工 fork' }}</button>
-        </form>
-        <form method="post" action="/repos/{{ repo.id }}/selfupdate">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="secondary">{{ '关闭自更新' if repo.self_update_interval else '开启自更新保活' }}</button>
-        </form>
-        <form method="post" action="/repos/{{ repo.id }}/actions">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="enabled" value="{{ '1' if repo.actions_disabled else '0' }}">
-          <button class="secondary">{{ '启用 Actions' if repo.actions_disabled else '禁用 Actions' }}</button>
-        </form>
-        <form method="post" action="/repos/{{ repo.id }}/remove" class="confirm"
-              data-confirm="仅从面板移除，不会删除 GitHub 仓库。自动发现开启时可能再次加入；如需停止同步，请用暂停。确认移除？">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="danger">移除管理</button></form>
-      </div>
-      </details>
-    </section>
-    <section class="card" aria-labelledby="repo-protection-title">
-      <h2 id="repo-protection-title">异常删除保护</h2>
-      <p class="field-help">当前{{ '开启' if protection.enabled else '关闭' }}；删除超过 {{ protection.max_files }} 个文件或 {{ '%g' | format(protection.max_percent) }}% 时拦截。开启时始终拦截空文件树和检测失败。</p>
-      <form method="post" action="/repos/{{ repo.id }}/protection" class="protection-form">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label for="repo-protection-mode">保护开关<select id="repo-protection-mode" name="protection_mode">
-          <option value="inherit" {% if repo.deletion_protection is none %}selected{% endif %}>跟随系统</option>
-          <option value="on" {% if repo.deletion_protection == 1 %}selected{% endif %}>此仓库开启</option>
-          <option value="off" {% if repo.deletion_protection == 0 %}selected{% endif %}>此仓库关闭（有内容丢失风险）</option>
-        </select></label>
-        <div class="protection-limits">
-          <label for="repo-max-files">删除文件数阈值<input id="repo-max-files" type="number" name="max_files" min="0" max="1000000" step="1" value="{{ repo.deletion_max_files if repo.deletion_max_files is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
-          <label for="repo-max-percent">删除比例阈值（%）<input id="repo-max-percent" type="number" name="max_percent" min="0" max="100" step="any" value="{{ repo.deletion_max_percent if repo.deletion_max_percent is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
-        </div>
-        <p id="repo-protection-help" class="field-help">阈值留空即跟随系统。镜像按 fork 当前文件计数；手工合并按共同祖先核实删除，不计 fork 独有文件。重命名按旧路径删除计数。关闭将允许空树和大量删除。</p>
-        <button class="secondary">保存此仓库保护</button>
-      </form>
-    </section>
-    <section class="card">
-      <h2>事件历史</h2>
-      {% if events %}
-      <div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events" data-columns="3">
-        <tr><th>时间</th><th>类型</th><th>说明</th></tr>
-        {% for e in events %}
-        <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ error_message(e.message) if e.kind in ('error', 'blocked', 'auth') else e.message }}</td></tr>
-        {% endfor %}
-      </table></div>
-      {% else %}<p class="muted">暂无事件。</p>{% endif %}
-    </section>
+  </div>
+  <p class="field-help">预览异步执行，请刷新查看结果。成功预览 10 分钟内可确认。暂停不会中断已发出的 Git 请求；结果会核对并保持暂停。</p>
+</section>
+<section class="card">
+  <h2>固定来源与范围</h2>
+  {% if config %}
+  <dl class="kv">
+    <dt>上游</dt><dd>{{ repo_link(config.source) }} · ID {{ config.source_id }}</dd>
+    <dt>目标</dt><dd>{{ repo_link(config.target) }} · ID {{ config.target_id }}</dd>
+    <dt>存储模式</dt><dd>{{ '公开 Fork' if config.mode == 'public-fork' else '经授权独立私有备份' }}</dd>
+    <dt>分支范围</dt><dd>所有 heads；主分支 {{ config.primary }}。sync-control 保留。</dd>
+    <dt>显式映射</dt><dd>{% for source, target in config.branch_map.items() %}<div><code>{{ source }}</code> → <code>{{ target }}</code>；旧 {{ source }} 保留</div>{% else %}同名同步{% endfor %}</dd>
+    <dt>最近检查</dt><dd>{{ timestamp(repo.last_check_at) }}</dd>
+    <dt>最近同步核对</dt><dd>{{ timestamp(repo.last_success_at) }}</dd>
+  </dl>
+  {% else %}<p class="notice warn">旧版记录尚未迁移。不要直接恢复，请在离线副本中审核并登记固定身份和映射。</p>{% endif %}
+  <p class="field-help">范围为 Git 分支、原始标签对象及可达历史，不含 LFS 实体、子模块内容、Issues、Release 附件或 GitHub 设置。不是整个项目的全量备份。</p>
+</section>
+{% if plan %}
+<section class="card">
+  <h2>最近引用检查</h2><p>{{ timestamp(plan.checked_at) }} · {{ plan.decisions|length }} 个源引用；{{ plan.target_only|length }} 个目标独有引用保留。</p>
+  <div class="table-wrap" role="region" aria-label="同步引用计划" tabindex="0"><table>
+    <thead><tr><th>来源 → 目标</th><th>决策</th><th>计划目标 SHA</th></tr></thead><tbody>
+    {% for item in plan.decisions %}<tr><td><code>{{ item.source }}</code><br><code>{{ item.target }}</code></td><td>{{ {'create':'创建','equal':'相同','fast-forward':'快进','preserved':'已审核保留原标签'}[item.action] }}</td><td><code>{{ item.old if item.action == 'preserved' else item.new }}</code>{% if item.action == 'preserved' %}<br>上游：<code>{{ item.new }}</code>{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>
+  {% if plan.target_only %}<details><summary>保留的目标独有引用</summary><ul>{% for ref in plan.target_only %}<li><code>{{ ref }}</code></li>{% endfor %}</ul></details>{% endif %}
+</section>
+{% endif %}
+<section class="card"><h2>事件记录</h2>
+  {% if events %}<div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events"><tr><th>时间</th><th>类型</th><th>结果</th></tr>{% for e in events %}<tr><td>{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ e.message }}</td></tr>{% endfor %}</table></div>{% else %}<p>暂无事件。</p>{% endif %}
+</section>
 {% endblock %}

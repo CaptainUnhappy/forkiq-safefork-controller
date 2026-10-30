@@ -7,16 +7,16 @@ def error_guidance(message):
     text = (message or "").lower()
     if "object does not exist" in text:
         return {"summary": "GitHub 找不到要同步的提交，本次同步未完成。",
-                "action": "镜像模式会重新读取上游提交并重试一次；若仍失败，约 10 分钟后自动再试，也可在仓库详情点「立即同步」。"}
+                "action": "同步已暂停。核对仓库身份和完整历史，完成只读预览后再确认恢复；不会强推或自动重试写入。"}
     if "workflow" in text and any(word in text for word in ("permission", "权限", "integration", "refusing")):
         return {"summary": "同步涉及工作流文件，但 GitHub App 缺少 Workflows 写入权限。",
-                "action": "请在 GitHub App 设置中授予 Workflows 读写权限，并在安装页面批准新增权限；完成后会自动重试。"}
+                "action": "核对专用 App 的 Workflows 读写权限及安装批准；目标 Actions 必须持续关闭。完成只读预览后再确认恢复。"}
     if "rate limit" in text or "限流" in text:
         return {"summary": "GitHub API 请求额度受限，检查或同步暂未完成。",
-                "action": "后台会继续按周期尝试；需等待 GitHub 解除限流，反复点击同步不会加快恢复。"}
+                "action": "已暂停写入。等待 GitHub 解除限流后先做只读预览；反复点击同步不会加快恢复。"}
     if any(word in text for word in ("仓库不可访问", "无法访问此仓库", "仓库已不在 github 上", "在 github 上已不存在")):
         return {"summary": "GitHub App 无法访问此仓库，暂时不能同步。",
-                "action": "请确认仓库仍存在，并检查 App 是否获准访问；仅凭无法访问不能确定仓库已被删除。恢复授权后可点「发现新 fork」重新检查。"}
+                "action": "请确认原仓库仍存在，并检查 App 是否获准访问；仅凭无法访问不能确定仓库已被删除。保持原身份配置，恢复授权后先做只读预览。"}
     if any(word in text for word in ("protected branch", "branch protection", "repository rule", "protected ref")):
         return {"summary": "GitHub 的分支保护或仓库规则阻止了本次同步。",
                 "action": "请在 GitHub 检查分支规则与 App 权限；面板不会自动关闭保护或绕过规则。"}
@@ -29,8 +29,8 @@ def error_guidance(message):
     if any(word in text for word in ("timed out", "timeout", "connection reset", "connection refused",
                                      "remote end closed", "name resolution", "urlopen error", "network down")):
         return {"summary": "连接 GitHub 失败，本次检查或同步未完成。",
-                "action": "后台会自动重试；仓库同步失败通常约 10 分钟后再试，持续失败时请检查服务器网络。"}
+                "action": "已暂停写入，不会自动重试。先检查网络；若推送结果不确定，应核对目标全部引用，再做只读预览。"}
     if re.search(r"(?:\bhttp(?:\s+error)?\s*|->\s*|['\"]status['\"]:\s*['\"]?)(?:500|502|503|504)\b", text):
         return {"summary": "GitHub 服务暂时异常，本次检查或同步未完成。",
-                "action": "后台会自动重试；仓库同步失败通常约 10 分钟后再试，无需修改仓库或权限。"}
+                "action": "已暂停写入，不会自动重试。等待服务恢复后先做只读预览，不要通过扩大权限或强推绕过。"}
     return None

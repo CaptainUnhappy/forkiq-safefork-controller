@@ -8,7 +8,7 @@
 {% block page_title %}仓库管理{% endblock %}
 {% block header_actions %}{% endblock %}
 {% block content %}
-    <div class="page-intro"><p class="muted">在仓库右侧暂停或恢复同步，不影响 GitHub Actions。</p></div>
+    <div class="page-intro"><p class="muted">仅追加和快进，保留已有历史与标签。目标仓库的 GitHub Actions 必须持续关闭。</p></div>
     {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
     <div class="filters">
         <a class="chip-link {% if not filter %}active{% endif %}" href="/repos">全部</a>
@@ -21,20 +21,28 @@
       </div>
     <div class="repo-toolbar">
     <details class="add-repo" {% if add_error %}open{% endif %}>
-      <summary>{{ icon('plus') }}加入已有 fork</summary>
+      <summary>{{ icon('plus') }}登记已有 SafeFork</summary>
       <div class="add-repo-body">
-      <p class="field-help" id="fork-add-help">粘贴已获 App 授权的 fork 链接，加入后安排同步；不会在 GitHub 创建仓库。</p>
+      <p class="field-help" id="fork-add-help">固定来源与目标身份。加入后保持暂停，不创建仓库、不关闭 Actions，也不会自动同步。</p>
       {% if add_error %}<div class="error">{{ add_error }}</div>{% endif %}
-      <form method="post" action="/repos/add" class="inline">
+      <form method="post" action="/repos/add" class="stacked-form">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label class="sr-only" for="fork-url">GitHub fork 仓库链接</label>
-        <input id="fork-url" type="url" name="url" placeholder="https://github.com/owner/repository" required aria-describedby="fork-add-help">
-        <button class="primary">加入并同步</button>
+        <label for="source-repo">上游仓库</label><input type="text" id="source-repo" name="source" placeholder="owner/repository" required aria-describedby="fork-add-help">
+        <label for="target-repo">已有目标仓库</label><input type="text" id="target-repo" name="target" placeholder="your-account/repository-SafeFork" required>
+        <label for="storage-mode">存储模式</label><select id="storage-mode" name="mode"><option value="public-fork">公开上游 → 公开原生 Fork</option><option value="standalone-private">私有上游 → 独立私有备份</option></select>
+        <label for="branch-map">分支映射（可留空，每行：源分支 目标分支）</label><textarea id="branch-map" name="branch_map" rows="3" placeholder="main upstream-main"></textarea>
+        <p class="field-help">映射仅用于已决定保留的旧分支；不会自动生成归档分支。请在登记前核对。</p>
+        <details><summary>已审核标签差异与私有授权</summary>
+          <label for="preserved-tags">保留标签（每行：标签名 目标原始SHA 上游原始SHA）</label><textarea id="preserved-tags" name="preserved_tags" rows="3"></textarea>
+          <label for="source-secret">私有来源凭据挂载文件名（不是 Token 内容）</label><input type="text" id="source-secret" name="source_secret" pattern="[A-Za-z0-9_-]{1,64}" placeholder="source_read_token">
+          <label class="check"><input type="checkbox" name="authorized" value="1">已获有权授权者允许，按约定独立复制并留存至上述私有目标</label>
+          <p class="field-help">私有目标不得属于 Fork 网络。来源凭据仅用于读取，不能填写、上传或公开令牌值。</p>
+        </details>
+        <button class="primary">登记并保持暂停</button>
       </form>
       </div>
     </details>
-    <form method="post" action="/discover"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon('refresh-cw') }}发现新 fork</button></form>
-    <span class="toolbar-help">自动发现{{ '已开启 · 每 60 分钟扫描' if auto_discover else '已关闭' }} · <a href="/settings#sync">设置</a></span>
+    <span class="toolbar-help">只同步显式登记且确认启用的仓库 · <a href="/settings#sync">检查间隔</a></span>
     </div>
     <section class="card">
       <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>

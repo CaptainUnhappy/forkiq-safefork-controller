@@ -15,8 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_PATHS = (
-    "app", "deploy", "tests", "requirements.txt", "LICENSE",
-    "README.md", "README.html", "PRODUCT.md", "PRODUCT.html", "DESIGN.md", "DESIGN.html",
+    "app", "deploy", "tests", "requirements.txt", "requirements.lock", "LICENSE",
+    "README.md", "SECURITY.md", "PRODUCT.md", "DESIGN.md", "Dockerfile", "compose.yaml",
+    "compose.private.example.yaml", ".dockerignore",
 )
 
 
@@ -37,11 +38,17 @@ def build_release(version, output, ref="HEAD", repo=ROOT):
                 continue
             if member.isdir():
                 continue
+            path = Path(member.name)
+            if (any(p in ("__pycache__", "state", "secrets", ".venv") for p in path.parts)
+                    or path.suffix.lower() in (".pem", ".key", ".db", ".sqlite", ".sqlite3", ".bundle", ".pyc")
+                    or path.name.startswith(".env") or path.name.endswith(("-wal", "-shm"))):
+                raise ValueError(f"Runtime/secret file is tracked in release scope: {member.name}")
             if not member.isfile():
                 raise ValueError(f"Unsupported release entry: {member.name}")
             mode = 0o755 if member.mode & 0o111 else 0o644
             files[member.name] = (archive.extractfile(member).read(), mode)
-    for required in ("app/main.py", "requirements.txt", "deploy/forkiq.service", "LICENSE"):
+    for required in ("app/main.py", "app/safefork.py", "app/gitstore.py", "app/push_guard.py",
+                     "requirements.lock", "Dockerfile", "compose.yaml", "LICENSE"):
         if required not in files:
             raise ValueError(f"Missing release file: {required}")
     manifest = {

@@ -1,0 +1,21 @@
+services:
+  controller:
+    build: .
+    image: forkiq-safefork-controller:local
+    ports:
+      - "127.0.0.1:8792:8792"
+    environment:
+      FORKIQ_PUBLIC_URL: "${FORKIQ_PUBLIC_URL:?set your own HTTPS origin}"
+    volumes:
+      - state:/var/lib/forkiq
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 64
+    restart: "no"
+volumes:
+  state:

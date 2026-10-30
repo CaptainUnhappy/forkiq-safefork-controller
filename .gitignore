@@ -9,3 +9,14 @@ __pycache__/
 *.db-shm
 app.pem
 dist/
+state/
+*.before-safefork
+*.pem
+*.key
+*.bundle
+.env
+.env.*
+!example.env
+secrets/
+test-output/
+output/playwright/

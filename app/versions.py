@@ -44,6 +44,12 @@ def version_verdict(repo):
     """
     fork = repo["fork_sha"] or ""
     upstream = repo["upstream_sha"] or ""
+    if _field(repo, "mode") == "safefork":
+        if repo["status"] == "synced":
+            return {"kind": "same", "text": "引用已核对", "sha": upstream,
+                    "title": "最近一次同步已核对所有受管引用；保留差异请查看详情。"}
+        return {"kind": "unsynced", "text": "查看引用计划", "sha": upstream,
+                "title": "单个主分支 SHA 不能证明全部分支和标签一致。"}
     merged = repo["last_merged_upstream_sha"] or ""
     status = repo["status"]
     upstream_ahead = _count(repo, "upstream_ahead")

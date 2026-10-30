@@ -13,7 +13,7 @@
     <div class="sidebar-note">跟进上游，保留历史。<br>同步过程始终可追溯。</div>
     <div class="sidebar-bottom">
       <button class="icon-button theme-toggle" type="button" aria-label="切换为深色主题" title="切换主题">{{ icon('moon', 'theme-moon') }}{{ icon('sun', 'theme-sun') }}</button>
-      <form method="post" action="/logout" class="logout"><button class="logout-button" type="submit">{{ icon('log-out') }}退出登录</button></form>
+      <form method="post" action="/logout" class="logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="logout-button" type="submit">{{ icon('log-out') }}退出登录</button></form>
     </div>
   </aside>
   <button type="button" class="sidebar-overlay" aria-label="关闭导航" tabindex="-1" hidden></button>

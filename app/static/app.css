@@ -46,8 +46,8 @@ h1 { font-size: 20px; line-height: 1.4; font-weight: 600; letter-spacing: -.02em
 h2 { margin-bottom: 16px; font-size: 16px; line-height: 1.5; font-weight: 600; }
 a { color: var(--primary); text-decoration: none; text-underline-offset: 3px; }
 a:hover { text-decoration: underline; }
-button, input { font: inherit; }
-button, a, input { -webkit-tap-highlight-color: transparent; }
+button, input, select, textarea { font: inherit; }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 button, .link { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 7px 13px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; line-height: 1.5; transition: background .18s, border-color .18s; }
 button:hover, .link:hover { text-decoration: none; }
 button:disabled { opacity: .55; cursor: wait; }
@@ -270,9 +270,9 @@ button.resume-button { color: var(--primary); border-color: var(--primary); back
 
 /* Keep forms native, labeled and comfortably usable on touch screens. */
 label { display: block; font-size: 13px; font-weight: 500; color: var(--ink); }
-input[type="password"], input[type="url"], input[type="number"], input[type="text"] { width: 100%; min-height: 42px; padding: 9px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; caret-color: var(--primary); transition: border-color .18s, background .18s; }
+input[type="password"], input[type="url"], input[type="number"], input[type="text"], .stacked-form select, .stacked-form textarea { width: 100%; min-height: 42px; padding: 9px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; caret-color: var(--primary); transition: border-color .18s, background .18s; }
 input::placeholder { color: var(--muted); opacity: 1; }
-input:focus { background: var(--card); border-color: var(--primary); outline: 2px solid var(--primary-soft); outline-offset: 1px; }
+input:focus, select:focus, textarea:focus { background: var(--card); border-color: var(--primary); outline: 2px solid var(--primary-soft); outline-offset: 1px; }
 input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--primary); }
 form.inline { display: flex; gap: 10px; align-items: center; }
 form.inline input { flex: 1; min-width: 0; }
@@ -283,6 +283,8 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 .content section form:not(.inline) > button { margin-top: 6px; }
 .stacked-form { display: grid; gap: 8px; }
 .stacked-form input { margin-bottom: 14px; }
+.stacked-form textarea { resize: vertical; }
+.stacked-form details > label { margin-top: 12px; }
 .stacked-form .error { margin-bottom: 8px; }
 
 /* Centered authentication follows the reference, without changing credentials. */

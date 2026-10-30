@@ -1,4 +1,4 @@
-# ForkIQ
+# ForkIQ SafeFork Controller
 <!-- impeccable:product-schema 1 -->
 
 ## Platform
@@ -8,23 +8,25 @@ web
 Administrators managing their GitHub forks from one private panel.
 
 ## Product Purpose
-Keep forks current with upstream and make synchronization failures actionable.
+Preserve upstream Git history without rewinding target branches, moving existing
+tags, or executing upstream CI. Make blocked synchronization visible and reviewable.
 
 ## Capabilities and Constraints
-FastAPI and server-rendered Jinja templates. GitHub App authentication, discovery,
-mirror synchronization, history-preserving upstream merges, optional workflow
-keepalive, repository controls, events, per-repository local/upstream version
-display (latest tag, short SHA, commit date) and administrator settings already exist.
-The redesign preserves all server actions, CSRF protections, password-only panel
-login, existing credentials and repository configuration. No real credentials
-belong in source, fixtures or documentation.
+FastAPI, server-rendered Jinja templates, SQLite, one serialized Git worker.
+Explicit repository registration pins source and target IDs. Registration stays
+paused until a read-only preview is confirmed. One safe write path handles all
+heads and raw tags using normal atomic push. Public sources use public native
+forks; authorized private sources use standalone private targets and separate
+read credentials. Target Actions remain disabled and quiescent.
+No discovery, merge, force, rollback, workflow keepalive, or Actions settings writes.
+No real credentials or private repository contents belong in source or fixtures.
 
 ## Brand Commitments
-Keep the ForkIQ name and Chinese interface. The user requests the visual language
-of https://kr.hx10.com:3000/#agents, including its centered login page: light
-neutral surfaces, white navigation and green actions.
+Retain ForkIQ attribution and the Chinese interface: light neutral surfaces,
+white navigation, green actions, and a centered login page.
 
 ## Product Principles
 - Preserve fork history and expose errors rather than hiding them.
 - Make repository state and available actions easy to scan.
-- Keep desktop and mobile workflows usable without changing synchronization.
+- Show full-ref plans and the limits of previews, pause, and synchronization.
+- Keep desktop and mobile workflows usable without hiding safety gates.

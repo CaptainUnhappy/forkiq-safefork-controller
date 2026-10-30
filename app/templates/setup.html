@@ -1,12 +1,12 @@
 {% extends "auth.html" %}
 {% block title %}ForkIQ · 设置管理员密码{% endblock %}
 {% block auth_title %}设置管理员密码{% endblock %}
-{% block auth_description %}<p class="auth-description">首次使用，请设置面板密码。至少 8 位。</p>{% endblock %}
+{% block auth_description %}<p class="auth-description">首次使用，请设置面板密码。至少 12 位；完成前不要公开管理入口。</p>{% endblock %}
 {% block auth_content %}
 <form method="post" action="/setup" class="stacked-form">
   {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
-  <label for="password">管理员密码</label><input id="password" type="password" name="password" autocomplete="new-password" minlength="8" required>
-  <label for="password2">再次输入</label><input id="password2" type="password" name="password2" autocomplete="new-password" minlength="8" required>
-  <button class="primary auth-submit" type="submit">继续连接 GitHub{{ icon('arrow-right') }}</button>
+  <label for="password">管理员密码</label><input id="password" type="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+  <label for="password2">再次输入</label><input id="password2" type="password" name="password2" autocomplete="new-password" minlength="12" maxlength="1024" required>
+  <button class="primary auth-submit" type="submit">设置密码并登录{{ icon('arrow-right') }}</button>
 </form>
 {% endblock %}

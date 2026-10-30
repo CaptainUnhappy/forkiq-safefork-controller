@@ -1,395 +1,126 @@
-"""GitHub App / REST / GraphQL client (urllib only)."""
-import base64
+"""Read-only GitHub metadata plus explicit App credential bootstrap."""
 import json
 import os
-import re
 import ssl
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
 import jwt
 
 API = "https://api.github.com"
-GRAPHQL = "https://api.github.com/graphql"
-GIT_SHA = re.compile(r"[0-9a-fA-F]{40}")
-
-
-class RateLimited(RuntimeError):
-    pass
-
-
-class RefNotFastForward(RuntimeError):
-    pass
-
-
-class RefObjectNotFound(RuntimeError):
-    """The target commit object is not available for a ref update."""
-
-
-class RefNotFound(RuntimeError):
-    """The requested ref (branch/tag) does not exist in the repository."""
-
-
-class Forbidden(RuntimeError):
-    """403 on a ref update: missing App permission (e.g. workflows) or blocked."""
-
-
-class MergeConflict(RuntimeError):
-    """merge-upstream 409/422: the fork cannot be merged cleanly."""
-
-
-class DispatchRejected(RuntimeError):
-    """workflow dispatch refused (non-permission): missing trigger, disabled, ..."""
-
-    def __init__(self, message, status=422):
-        super().__init__(message)
-        self.status = status
 
 
 class AuthError(RuntimeError):
     pass
 
 
+class RateLimited(RuntimeError):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class GitHub:
-    """Talks to GitHub with an App JWT and cached installation tokens.
+    def __init__(self, app_id=None, pem_path=None, installation_id=None, token=None):
+        self.app_id, self.pem_path, self.installation_id = app_id, pem_path, installation_id
+        self.source_token = token
+        self._token, self._token_exp = None, 0
 
-    Subclass and override `_request` in tests to script responses.
-    """
-
-    def __init__(self, app_id=None, pem_path=None, installation_id=None):
-        self.app_id = app_id
-        self.pem_path = pem_path
-        self.installation_id = installation_id
-        self._token = None
-        self._token_exp = 0
-
-    # -- transport ---------------------------------------------------------
     def _request(self, method, url, headers, body=None, timeout=20):
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        for key, value in headers.items():
-            req.add_header(key, value)
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        ctx = ssl.create_default_context()
+        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                raw = resp.read().decode()
-                return resp.status, (json.loads(raw) if raw else None), dict(resp.headers)
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode()
-            try:
-                payload = json.loads(raw) if raw else None
-            except ValueError:
-                payload = {"message": raw[:500]}
-            return e.code, payload, dict(e.headers)
+            with opener.open(req, timeout=timeout) as response:
+                raw = response.read(16 * 1024 * 1024 + 1)
+                if len(raw) > 16 * 1024 * 1024:
+                    raise RuntimeError("GitHub 返回数据超过安全上限。")
+                return response.status, json.loads(raw) if raw else None, dict(response.headers)
+        except urllib.error.HTTPError as error:
+            return error.code, {}, dict(error.headers)
+        except (urllib.error.URLError, TimeoutError):
+            raise RuntimeError("无法连接 GitHub，请检查网络。") from None
 
-    # -- app auth ----------------------------------------------------------
     def app_jwt(self):
-        pem = Path(self.pem_path).read_text()
         now = int(time.time())
         return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": str(self.app_id)},
-                          pem, algorithm="RS256")
+                          Path(self.pem_path).read_text(), algorithm="RS256")
 
     def installation_token(self):
+        if self.source_token is not None:
+            return self.source_token
         if self._token and time.time() < self._token_exp:
             return self._token
         if not (self.app_id and self.pem_path and self.installation_id):
-            raise AuthError("GitHub App 尚未配置")
-        status, payload, _ = self._request(
-            "POST", f"{API}/app/installations/{self.installation_id}/access_tokens",
-            {"Authorization": f"Bearer {self.app_jwt()}", "Accept": "application/vnd.github+json"})
+            raise AuthError("GitHub App 尚未配置。")
+        status, payload, _ = self._request("POST", f"{API}/app/installations/{self.installation_id}/access_tokens",
+                                         {"Authorization": f"Bearer {self.app_jwt()}"})
         if status != 201:
-            raise AuthError(f"获取安装令牌失败: {status} {str(payload)[:200]}")
-        self._token = payload["token"]
-        self._token_exp = time.time() + 3000
+            raise AuthError(f"获取安装令牌失败（HTTP {status}）。")
+        self._token, self._token_exp = payload["token"], time.time() + 3000
         return self._token
 
-    def reset_token(self):
-        self._token = None
-        self._token_exp = 0
-
-    # -- REST helpers ------------------------------------------------------
-    def _api(self, method, path, body=None, ok=(200, 201), timeout=20):
-        status, payload, headers = self._request(
-            method, API + path,
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, body, timeout)
-        if status in (401, 403) and payload and "rate limit" in str(payload.get("message", "")).lower():
-            raise RateLimited(str(payload)[:200])
-        if status == 401:
-            self.reset_token()
-            raise AuthError(f"认证失败: {status} {str(payload)[:200]}")
-        if status not in ok:
-            raise RuntimeError(f"GitHub {method} {path} -> {status}: {str(payload)[:300]}")
-        return status, payload
-
-    def installation_repos(self):
-        repos, page = [], 1
-        while True:
-            _, payload = self._api("GET", f"/installation/repositories?per_page=100&page={page}")
-            repos.extend(payload["repositories"])
-            if len(payload["repositories"]) < 100:
-                return repos
-            page += 1
+    def _api(self, method, path, body=None):
+        if method != "GET" or body is not None or not path.startswith("/"):
+            raise RuntimeError("SafeFork 元数据客户端只允许 GET；引用写入须经过安全计划。")
+        status, payload, headers = self._request(method, API + path,
+                                                {"Authorization": f"Bearer {self.installation_token()}"})
+        if status == 429 or (status == 403 and headers.get("X-RateLimit-Remaining") == "0"):
+            raise RateLimited("GitHub 限流，已停写。")
+        if status in (401, 403, 404):
+            raise AuthError(f"GitHub 无法读取已登记仓库或权限（HTTP {status}）；不会改用其他来源。")
+        if status != 200 or not isinstance(payload, (dict, list)):
+            raise RuntimeError(f"GitHub 读取失败（HTTP {status}）。")
+        return payload
 
     def get_repo(self, full_name):
-        _, payload = self._api("GET", f"/repos/{full_name}")
-        return payload
-
-    def get_ref(self, full_name, branch):
-        status, payload = self._api("GET", f"/repos/{full_name}/git/ref/heads/{branch}",
-                                    ok=(200, 404))
-        if status == 404:
-            raise RefNotFound(f"{full_name} 没有分支 {branch}")
-        return payload["object"]["sha"]
-
-    def file_paths(self, full_name, commit_sha):
-        """Read a complete file tree for an immutable commit; never use partial data."""
-        if not isinstance(commit_sha, str) or not GIT_SHA.fullmatch(commit_sha):
-            raise ValueError("File-tree detection requires a full commit SHA")
-        commit_sha = commit_sha.lower()
-
-        def invalid(reason):
-            return RuntimeError(f"文件树检测失败 {full_name}@{commit_sha[:12]}：{reason}")
-
-        def read(path):
-            try:
-                return self._api("GET", path)[1]
-            except (AuthError, RateLimited):
-                raise
-            except Exception as error:
-                raise invalid(str(error)) from error
-
-        commit = read(f"/repos/{full_name}/git/commits/{commit_sha}")
-        if not isinstance(commit, dict) or commit.get("sha") != commit_sha:
-            raise invalid("提交响应缺失或 SHA 不匹配")
-        tree = commit.get("tree")
-        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
-        if not isinstance(tree_sha, str) or not GIT_SHA.fullmatch(tree_sha):
-            raise invalid("提交缺少有效的文件树 SHA")
-        payload = read(f"/repos/{full_name}/git/trees/{tree_sha}?recursive=1")
-        if not isinstance(payload, dict) or payload.get("sha") != tree_sha:
-            raise invalid("文件树响应缺失或 SHA 不匹配")
-        if payload.get("truncated") is not False:
-            raise invalid("文件树被截断或未声明完整，无法安全计算删除数量")
-        entries = payload.get("tree")
-        if not isinstance(entries, list):
-            raise invalid("文件树条目不是列表")
-        kinds = {}
-        modes = {"blob": {"100644", "100755", "120000"}, "tree": {"040000"}, "commit": {"160000"}}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise invalid("文件树条目无效")
-            path, kind, sha = entry.get("path"), entry.get("type"), entry.get("sha")
-            if (not isinstance(path, str) or not path or "\x00" in path
-                    or any(part in ("", ".", "..") for part in path.split("/"))):
-                raise invalid("文件树路径无效")
-            if (path in kinds or not isinstance(kind, str) or kind not in modes
-                    or not isinstance(entry.get("mode"), str) or entry["mode"] not in modes[kind]
-                    or not isinstance(sha, str) or not GIT_SHA.fullmatch(sha)):
-                raise invalid("文件树包含重复路径、未知类型或不完整条目")
-            kinds[path] = kind
-        for path in kinds:
-            parts = path.split("/")
-            if any(kinds.get("/".join(parts[:index])) != "tree" for index in range(1, len(parts))):
-                raise invalid("递归文件树缺少父目录")
-        return {path for path, kind in kinds.items() if kind in ("blob", "commit")}
-
-    def update_ref(self, full_name, branch, sha, force=False):
-        status, payload, _ = self._request(
-            "PATCH", f"{API}/repos/{full_name}/git/refs/heads/{branch}",
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"sha": sha, "force": bool(force)})
-        if status == 422:
-            message = str((payload or {}).get("message", payload))
-            detail = f"update_ref {full_name}:{branch} -> 422: {message[:200]}"
-            if (payload or {}).get("errors"):
-                detail += f"; errors={json.dumps(payload['errors'], ensure_ascii=False)[:200]}"
-            normalized = message.lower().replace("-", " ").strip().rstrip(".")
-            if normalized == "object does not exist":
-                raise RefObjectNotFound(detail)
-            if "not a fast forward" in normalized:
-                raise RefNotFastForward(detail)
-            raise RuntimeError(detail)
-        if status == 403:
-            message = str((payload or {}).get("message", ""))
-            if "rate limit" in message.lower():
-                raise RateLimited(str(payload)[:200])
-            raise Forbidden(str(payload)[:300])
-        if status not in (200, 201):
-            raise RuntimeError(f"update_ref {full_name} -> {status}: {str(payload)[:300]}")
-        return payload["object"]["sha"]
-
-    def merge_upstream(self, full_name, branch):
-        """Server-side "Sync fork": merge upstream into the fork, keeping its commits."""
-        status, payload, _ = self._request(
-            "POST", f"{API}/repos/{full_name}/merge-upstream",
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"branch": branch})
-        if status == 200:
-            return payload or {}
-        if status == 409:
-            raise MergeConflict(str((payload or {}).get("message", payload))[:200])
-        if status == 403:
-            message = str((payload or {}).get("message", ""))
-            if "rate limit" in message.lower():
-                raise RateLimited(str(payload)[:200])
-            raise Forbidden(str(payload)[:300])
-        if status == 422:
-            message = str((payload or {}).get("message", payload))
-            if "workflow" in message.lower():
-                raise Forbidden(message[:300])
-            raise MergeConflict(message[:200])
-        raise RuntimeError(f"merge_upstream {full_name} -> {status}: {str(payload)[:300]}")
-
-    def merge_commit(self, full_name, branch, target_sha):
-        """Merge the reviewed commit, not an upstream branch that may have moved."""
-        if not isinstance(target_sha, str) or not GIT_SHA.fullmatch(target_sha):
-            raise ValueError("Merge requires a full target commit SHA")
-        target_sha = target_sha.lower()
-        status, payload, _ = self._request(
-            "POST", f"{API}/repos/{full_name}/merges",
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"base": branch, "head": target_sha})
-        if status == 201:
-            sha = payload.get("sha") if isinstance(payload, dict) else None
-            if not isinstance(sha, str) or not GIT_SHA.fullmatch(sha):
-                raise RuntimeError(f"merge_commit {full_name} -> 201: response has no valid commit SHA")
-            return {**payload, "merge_type": "fast-forward" if sha == target_sha else "merge"}
-        if status == 204:
-            return {"merge_type": "none"}
-        message = str(payload.get("message", payload) if isinstance(payload, dict) else payload)
-        if status == 429 or (status in (401, 403) and "rate limit" in message.lower()):
-            raise RateLimited(message[:200])
-        if status == 401:
-            self.reset_token()
-            raise AuthError(f"认证失败: {status} {message[:200]}")
-        if status == 403 or (status == 422 and "workflow" in message.lower()):
-            raise Forbidden(message[:300])
-        if status in (409, 422):
-            raise MergeConflict(message[:200])
-        raise RuntimeError(f"merge_commit {full_name} -> {status}: {str(payload)[:300]}")
-
-    def compare(self, fork_full, base, head):
-        status, payload = self._api(
-            "GET", f"/repos/{fork_full}/compare/{base}...{head}", ok=(200, 404))
-        if status == 404:
-            # "No common ancestor between ...": unrelated histories.
-            return None
-        return payload
-
-    def set_actions_enabled(self, full_name, enabled):
-        self._api("PUT", f"/repos/{full_name}/actions/permissions",
-                  {"enabled": bool(enabled)}, ok=(200, 201, 204))
+        from .safefork import repo_name
+        return self._api("GET", f"/repos/{repo_name(full_name)}")
 
     def actions_enabled(self, full_name):
-        _, payload = self._api("GET", f"/repos/{full_name}/actions/permissions")
-        return bool(payload.get("enabled"))
+        payload = self._api("GET", f"/repos/{full_name}/actions/permissions")
+        if type(payload.get("enabled")) is not bool:
+            raise RuntimeError("Actions 开关状态不完整，拒绝推送。")
+        return payload["enabled"]
 
-    def workflow_permissions(self, full_name):
-        _, payload = self._api("GET", f"/repos/{full_name}/actions/permissions/workflow")
-        return payload
-
-    def set_workflow_permissions(self, full_name, mode="write"):
-        self._api("PUT", f"/repos/{full_name}/actions/permissions/workflow",
-                  {"default_workflow_permissions": mode}, ok=(200, 201, 204))
-
-    def list_workflows(self, full_name):
-        _, payload = self._api("GET", f"/repos/{full_name}/actions/workflows?per_page=100")
-        return payload.get("workflows", [])
-
-    def workflow_state(self, full_name, workflow_id):
-        _, payload = self._api("GET", f"/repos/{full_name}/actions/workflows/{workflow_id}")
-        return payload.get("state")
-
-    def enable_workflow(self, full_name, workflow_id):
-        status, payload, _ = self._request(
-            "PUT", f"{API}/repos/{full_name}/actions/workflows/{workflow_id}/enable",
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"})
-        if status in (200, 204):
-            return True
-        message = str((payload or {}).get("message", payload))
-        if status == 403:
-            if "rate limit" in message.lower():
-                raise RateLimited(str(payload)[:200])
-            raise Forbidden(message[:300])
-        raise DispatchRejected(f"{status}: {message[:250]}", status=status)
-
-    def get_file_text(self, full_name, path):
-        _, payload = self._api("GET", f"/repos/{full_name}/contents/{path}")
-        return base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
-
-    def recent_runs(self, full_name, per_page=30):
-        _, payload = self._api("GET", f"/repos/{full_name}/actions/runs?per_page={per_page}")
-        return payload.get("workflow_runs", [])
-
-    def latest_workflow_run(self, full_name, workflow_id):
-        _, payload = self._api(
-            "GET", f"/repos/{full_name}/actions/workflows/{workflow_id}/runs?per_page=1")
-        runs = payload.get("workflow_runs", [])
-        return runs[0] if runs else None
-
-    def dispatch_workflow(self, full_name, workflow_id, ref):
-        """Trigger a workflow_dispatch run (used for fork self-update)."""
-        status, payload, _ = self._request(
-            "POST", f"{API}/repos/{full_name}/actions/workflows/{workflow_id}/dispatches",
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"ref": ref})
-        if status == 204:
-            return True
-        message = str((payload or {}).get("message", payload))
-        if status == 403:
-            if "rate limit" in message.lower():
-                raise RateLimited(str(payload)[:200])
-            raise Forbidden(message[:300])
-        raise DispatchRejected(f"{status}: {message[:250]}", status=status)
+    def has_active_runs(self, full_name):
+        for state in ("queued", "in_progress", "waiting", "pending", "requested"):
+            payload = self._api("GET", f"/repos/{full_name}/actions/runs?status={state}&per_page=1")
+            if type(payload.get("total_count")) is not int or not isinstance(payload.get("workflow_runs"), list):
+                raise RuntimeError("Actions 运行状态不完整，拒绝推送。")
+            if payload["total_count"] or payload["workflow_runs"]:
+                return True
+        return False
 
     def app_installations(self):
-        status, payload, _ = self._request(
-            "GET", f"{API}/app/installations",
-            {"Authorization": f"Bearer {self.app_jwt()}", "Accept": "application/vnd.github+json"})
-        if status != 200:
-            raise AuthError(f"列出安装失败: {status} {str(payload)[:200]}")
-        return payload
-
-    # -- GraphQL -----------------------------------------------------------
-    def graphql(self, query, variables):
-        status, payload, _ = self._request(
-            "POST", GRAPHQL,
-            {"Authorization": f"token {self.installation_token()}",
-             "Accept": "application/vnd.github+json"}, {"query": query, "variables": variables})
-        if status != 200:
-            raise RuntimeError(f"GraphQL -> {status}: {str(payload)[:300]}")
-        data = payload.get("data")
-        if data is None:
-            raise RuntimeError(f"GraphQL errors: {str(payload.get('errors'))[:300]}")
-        # Partial errors (e.g. one node id unresolvable) still return usable
-        # data with nulls at the failed positions; callers skip null nodes.
-        return data
-
-    # -- manifest ----------------------------------------------------------
-    def exchange_manifest(self, code):
-        status, payload, _ = self._request(
-            "POST", f"{API}/app-manifests/{code}/conversions",
-            {"Accept": "application/vnd.github+json"})
-        if status not in (200, 201):
-            raise AuthError(f"manifest 兑换失败: {status} {str(payload)[:300]}")
+        status, payload, _ = self._request("GET", f"{API}/app/installations?per_page=100",
+                                         {"Authorization": f"Bearer {self.app_jwt()}"})
+        if status != 200 or not isinstance(payload, list) or len(payload) >= 100:
+            raise AuthError("无法完整读取 GitHub App 安装列表。")
         return payload
 
 
 def write_pem(path, pem):
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w") as stream:
         stream.write(pem)
-    os.chmod(str(p), 0o600)
+    p.chmod(0o600)
 
 
 def exchange_manifest(code):
-    """Exchange a manifest code for App credentials (no auth required)."""
-    return GitHub().exchange_manifest(code)
+    if not code.isalnum():
+        raise AuthError("授权码无效。")
+    status, payload, _ = GitHub()._request("POST", f"{API}/app-manifests/{code}/conversions", {})
+    if status not in (200, 201):
+        raise AuthError(f"manifest 兑换失败（HTTP {status}）。")
+    return payload

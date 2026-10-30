@@ -1,0 +1,10 @@
+# Optional override: only the secret directory path is configured here, never a token.
+services:
+  controller:
+    volumes:
+      - type: bind
+        source: "${FORKIQ_SOURCE_SECRETS_DIR_HOST:?set an existing absolute secret directory}"
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false

@@ -16,7 +16,7 @@
   <a class="secondary link auth-submit" href="https://github.com/settings/installations/{{ installation_id }}" target="_blank" rel="noopener">管理仓库授权</a>
 {% elif app_slug %}
   <div class="notice warn"><strong>{{ app_slug }} · 待安装授权</strong><br>已有 App，无需重新创建。</div>
-  <p class="field-help">打开 GitHub 安装页，选择要授权的仓库；完成后返回检测。选择 All repositories 可自动发现后续新 fork。</p>
+  <p class="field-help">打开安装页，仅选择已批准的目标仓库；完成后返回检测。不要授权所有仓库。</p>
   <a class="secondary link auth-submit" href="https://github.com/apps/{{ app_slug }}/installations/new" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
   <form method="post" action="/github/detect">
     <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -29,14 +29,14 @@
   {% else %}
   <ol class="connect-steps">
     <li>在 GitHub 创建专用 App，权限已预填。</li>
-    <li>安装到你的账号，选择 All repositories。</li>
-    <li>返回面板，检测安装并开始同步。</li>
+    <li>安装到你的账号，选择 Only select repositories。</li>
+    <li>返回面板，检测安装；登记仓库后先预览，再确认启用。</li>
   </ol>
   <form method="post" action="{{ manifest_url }}?state={{ state }}" id="manifest-form">
     <input type="hidden" name="manifest" value='{{ manifest }}'>
     <button class="primary auth-submit" type="submit">在 GitHub 上创建 App{{ icon('arrow-right') }}</button>
   </form>
-  <p class="auth-footnote">创建后 GitHub 会自动跳回面板。授权包含 Contents、Workflows、Actions、Administration 与 Metadata。</p>
+  <p class="auth-footnote">Contents 与 Workflows 写入；Actions、Administration、Metadata 只读。目标 Actions 须在 GitHub 持续关闭。</p>
   {% endif %}
 {% endif %}
 <a class="auth-back" href="/">返回概览</a>

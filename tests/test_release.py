@@ -23,22 +23,26 @@ class ReleaseTests(unittest.TestCase):
         self.git("config", "user.name", "Release Test")
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "commit.gpgsign", "false")
+        self.git("config", "core.autocrlf", "false")
         self.sources = {
             "app/main.py": b"# committed application\n",
             "app/static/app.css": b"body { margin: 0; }\n",
-            "deploy/forkiq.service": b"[Service]\n",
-            "deploy/bootstrap.sh": b"#!/bin/sh\nexit 0\n",
+            "app/safefork.py": b"# safe policy\n",
+            "app/gitstore.py": b"# safe transport\n",
+            "app/push_guard.py": b"# trusted pre-push guard\n",
+            "deploy/package.py": b"# package builder\n",
+            "Dockerfile": b"FROM fixture\n",
+            "compose.yaml": b"services: {}\n",
+            "requirements.lock": b"fastapi==0.0.0\n",
             "requirements.txt": b"fastapi\n",
             "LICENSE": b"MIT\n",
             "README.md": b"# ForkIQ\n",
-            "README.html": b"<h1>ForkIQ</h1>\n",
             ".github/workflows/release.yml": b"# build metadata, not runtime\n",
         }
         for name, data in self.sources.items():
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        (self.repo / "deploy/bootstrap.sh").chmod(0o755)
         self.git("add", ".")
         env = dict(os.environ, GIT_AUTHOR_DATE="2026-10-28T00:00:00+00:00",
                    GIT_COMMITTER_DATE="2026-10-28T00:00:00+00:00")
@@ -55,11 +59,8 @@ class ReleaseTests(unittest.TestCase):
         tgz, zipped, checksums = self.build()
         with tarfile.open(tgz) as archive:
             tar_files = {entry.name: archive.extractfile(entry).read() for entry in archive}
-            bootstrap = archive.getmember("forkiq-v1.0.0/deploy/bootstrap.sh")
-            self.assertEqual(bootstrap.mode, 0o755)
         with zipfile.ZipFile(zipped) as archive:
             zip_files = {name: archive.read(name) for name in archive.namelist()}
-            self.assertEqual(archive.getinfo("forkiq-v1.0.0/deploy/bootstrap.sh").external_attr >> 16 & 0o777, 0o755)
         self.assertEqual(tar_files, zip_files)
         expected = {"forkiq-v1.0.0/" + name: data for name, data in self.sources.items()
                     if not name.startswith(".github/")}
@@ -92,6 +93,13 @@ class ReleaseTests(unittest.TestCase):
         second = self.build(directory="second")
         for a, b in zip(first, second):
             self.assertEqual(a.read_bytes(), b.read_bytes(), a.suffix)
+
+    def test_tracked_secret_file_fails_closed(self):
+        (self.repo / "app/app.pem").write_bytes(b"fake-secret-fixture")
+        self.git("add", "app/app.pem")
+        self.git("commit", "-qm", "bad fixture")
+        with self.assertRaisesRegex(ValueError, "Runtime/secret"):
+            self.build()
 
     def test_requested_tag_packages_the_tagged_commit(self):
         self.git("tag", "v1.0.0")

@@ -1,0 +1,55 @@
+name: Controller CI
+
+on:
+  push:
+    branches: [main, safefork-controller]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controller-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.lock
+      - run: python deploy/audit_history.py
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+      - run: node --test tests/test_ui.js
+        env:
+          TZ: UTC
+      - run: node --test tests/test_ui.js
+        env:
+          TZ: Asia/Shanghai
+
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build --pull -t forkiq-safefork-controller:ci .
+      - run: python3 deploy/container_smoke.py --image forkiq-safefork-controller:ci
+      - name: Check runtime image contents
+        run: |
+          docker run --rm --entrypoint python forkiq-safefork-controller:ci -c 'from pathlib import Path; p=Path("/opt/forkiq"); forbidden={".pem",".key",".db",".sqlite",".bundle",".pyc"}; assert not any(f.suffix in forbidden or f.name.startswith(".env") for f in p.rglob("*") if f.is_file()); assert not (p/".git").exists(); assert not (p/"app/restore.py").exists(); print("PASS: no runtime secrets, database, Git metadata or rollback module in application image")'

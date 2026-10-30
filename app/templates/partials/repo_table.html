@@ -26,7 +26,7 @@
         {% if r.enabled and r.status != 'paused' %}
         <button class="secondary" aria-label="暂停同步 {{ r.full_name }}">{{ icon('pause') }}暂停</button>
         {% else %}
-        <button class="secondary resume-button" aria-label="恢复同步 {{ r.full_name }}">{{ icon('refresh-cw') }}恢复</button>
+        <a class="secondary link" href="/repos/{{ r.id }}">预览与确认</a>
         {% endif %}
       </form>
       <a href="/repos/{{ r.id }}" aria-label="查看 {{ r.full_name }} 的仓库详情">详情</a>
@@ -35,5 +35,5 @@
   {% endfor %}
 </table></div>
 {% elif filter %}<p class="muted">没有符合筛选条件的仓库。<a href="/repos">查看全部仓库</a></p>
-{% else %}<p class="muted">还没有受管仓库。粘贴一个 fork 链接，或在设置里开启自动发现。</p>{% endif %}
+{% else %}<p class="muted">还没有受管仓库。先连接专用 App，再登记已准备好的上游和目标仓库。</p>{% endif %}
 </div>

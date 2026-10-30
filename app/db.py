@@ -1,6 +1,7 @@
 """SQLite storage for ForkIQ."""
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,8 +15,8 @@ CREATE TABLE IF NOT EXISTS repositories(
   full_name TEXT NOT NULL UNIQUE,
   upstream_full_name TEXT,
   branch TEXT NOT NULL DEFAULT 'main',
-  mode TEXT NOT NULL DEFAULT 'mirror',
-  enabled INTEGER NOT NULL DEFAULT 1,
+  mode TEXT NOT NULL DEFAULT 'safefork',
+  enabled INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
   upstream_sha TEXT,
   fork_sha TEXT,
@@ -83,6 +84,7 @@ def utcnow():
 class DB:
     def __init__(self, path):
         self.path = str(path)
+        Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # One connection per thread. Opening a connection and re-issuing
         # `PRAGMA journal_mode=WAL` for every query meant every read waited on
         # the write lock that pragma needs; on the shared production host that
@@ -114,6 +116,17 @@ class DB:
         conn.executescript(SCHEMA)
         # Additive migrations for databases created before these columns.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(repositories)")}
+        if "config_json" not in columns and conn.execute("SELECT COUNT(*) FROM repositories").fetchone()[0]:
+            # Keep the first recovery copy; never overwrite it on a retried migration.
+            backup_path = Path(self.path + ".before-safefork")
+            if not backup_path.exists():
+                backup_path.touch(mode=0o600, exist_ok=False)
+                backup = sqlite3.connect(backup_path)
+                try:
+                    conn.backup(backup)
+                finally:
+                    backup.close()
+        conn.execute("BEGIN IMMEDIATE")
         if "mode" not in columns:
             conn.execute("ALTER TABLE repositories ADD COLUMN mode TEXT NOT NULL DEFAULT 'mirror'")
         if "last_merged_upstream_sha" not in columns:
@@ -145,7 +158,30 @@ class DB:
         for name, kind in (("restore_backup_id", "INTEGER"), ("restore_expected_sha", "TEXT")):
             if name not in columns:
                 conn.execute(f"ALTER TABLE repositories ADD COLUMN {name} {kind}")
+        if "config_json" not in columns:
+            # Existing installations never inherit authority to use a new writer.
+            conn.execute("ALTER TABLE repositories ADD COLUMN config_json TEXT")
+            conn.execute("ALTER TABLE repositories ADD COLUMN plan_json TEXT")
+            conn.execute("ALTER TABLE repositories ADD COLUMN dry_run_requested INTEGER NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE repositories ADD COLUMN review_required INTEGER NOT NULL DEFAULT 1")
+            conn.execute("UPDATE repositories SET enabled=0,status='paused',sync_requested=0,"
+                         "restore_backup_id=NULL,restore_expected_sha=NULL,self_update_interval=NULL,"
+                         "last_error='需要显式登记 SafeFork 来源和权限；原仓库引用未改动。'")
+            conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_discover','0')")
+        if "control_epoch" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN control_epoch INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        conn = self.connect()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     def run(self, sql, params=()):
         conn = self.connect()
@@ -178,7 +214,7 @@ def insert_repository(db, *, owner, name, full_name, upstream_full_name, branch=
     now = utcnow()
     cur = db.run(
         "INSERT INTO repositories(owner,name,full_name,upstream_full_name,branch,node_id,"
-        "status,discovered,is_archived,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "status,discovered,is_archived,created_at,updated_at,enabled,mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,'safefork')",
         (owner, name, full_name, upstream_full_name, branch, node_id, status,
          discovered, is_archived, now, now))
     return cur.lastrowid
