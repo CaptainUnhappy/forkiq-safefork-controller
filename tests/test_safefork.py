@@ -282,6 +282,20 @@ class RealGitTests(unittest.TestCase):
             synchronize(config(), store, lambda: None)
             self.assertEqual(store.refs("target"), before)
 
+    def test_workflow_files_preserve_git_objects_without_execution(self):
+        workflow = self.source / ".github" / "workflows" / "fixture.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: Harmless fixture\non: [push]\njobs:\n  marker:\n    runs-on: ubuntu-latest\n"
+                            "    steps:\n      - run: echo fixture > untrusted-marker\n", encoding="utf-8")
+        self.git(self.source, "add", ".github/workflows/fixture.yml")
+        self.commit("workflow fixture")
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+        ref = "main:.github/workflows/fixture.yml"
+        self.assertEqual(self.git(self.source, "rev-parse", ref), self.git(self.target, "rev-parse", ref))
+        self.assertFalse((self.root / "untrusted-marker").exists())
+        self.assertFalse((self.source / "untrusted-marker").exists())
+
     def test_upstream_rollback_never_moves_target(self):
         b = self.commit("second")
         self.git(self.source, "push", str(self.target), "main:main")

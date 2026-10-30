@@ -55,8 +55,13 @@ def check(image):
         request("/setup", {"password": fixture_password, "password2": fixture_password})
         _, page = request("/login", {"password": fixture_password})
         assert "概览" in page
+        print("PASS: cold start and login", flush=True)
         # Restart with the same mounted volume and verify the setup and session survive.
         docker("restart", container)
+        # An automatically allocated host port may change across restarts.
+        restarted_address = docker("port", container, "8792/tcp").splitlines()[0]
+        print(f"Test port before/after restart: {address} -> {restarted_address}", flush=True)
+        origin = "http://" + restarted_address
         wait_healthy(origin)
         final_url, _ = request("/setup")
         assert not final_url.endswith("/setup")
@@ -68,6 +73,12 @@ def check(image):
                           "print(c.execute(\"SELECT count(*) FROM settings WHERE key='github_installation_id'\").fetchone()[0])")
         assert settings.splitlines() == ["0", "0"]
         print("PASS: non-root cold start, live worker, read-only root, 512 MiB limit, volume restart, no GitHub credentials/repos")
+    except BaseException:
+        if container:
+            # This uniquely created container has only synthetic credentials.
+            subprocess.run(["docker", "logs", "--tail", "100", container], check=False)
+            subprocess.run(["docker", "inspect", "--format", "{{json .State}}", container], check=False)
+        raise
     finally:
         if container:
             docker("rm", "-f", container)
