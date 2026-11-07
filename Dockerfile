@@ -13,4 +13,4 @@ USER 10001:10001
 EXPOSE 8792
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
     CMD python -c "import json,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8792/healthz',timeout=3)); assert r['status']=='ok'"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8792", "--workers", "1"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8792", "--workers", "1", "--no-access-log"]
