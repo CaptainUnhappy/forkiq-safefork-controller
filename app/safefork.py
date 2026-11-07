@@ -151,17 +151,21 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     store.fetch("source", source)
     store.fetch("target", target)
     plan = make_plan(config, source, target, store)
+    expected = {**target, **plan["updates"]}
+    plan["archive"] = store.archive_plan(config, expected)
     verify_identity()
     if store.refs("source") != source or store.refs("target") != target:
         raise SyncBlocked("规划期间引用变化，未写入；请重新检查。")
-    if dry_run or not plan["updates"]:
+    if dry_run:
         return plan
+    before_write()
+    plan["archive"] = store.preserve(config, expected, plan["archive"])
     verify_identity()
     if store.refs("source") != source or store.refs("target") != target:
         raise SyncBlocked("写入前引用变化，未写入。")
     before_write()
-    store.push(plan["updates"], target)
-    expected = {**target, **plan["updates"]}
+    if plan["updates"]:
+        store.push(plan["updates"], target)
     for attempt in range(3):
         if store.refs("target") == expected:
             return plan

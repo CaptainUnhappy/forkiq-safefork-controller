@@ -124,6 +124,29 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((self.row()["enabled"], self.row()["status"]), (0, "paused"))
         self.assertEqual(self.row()["review_required"], 1)
 
+    def test_pause_while_archive_is_saved_stops_remote_push(self):
+        self.add()
+        preserve = self.store.preserve
+        def save_then_pause(cfg, expected, archive):
+            result = preserve(cfg, expected, archive)
+            self.pause()
+            return result
+        self.store.preserve = save_then_pause
+        self.cycle()
+        self.assertEqual(self.store.archived[MAIN], B)
+        self.assertEqual(self.store.writes, [])
+        self.assertEqual((self.row()["enabled"], self.row()["status"]), (0, "paused"))
+
+    def test_crash_during_archive_is_latched_and_never_auto_retried(self):
+        self.add()
+        self.store.preserve = Mock(side_effect=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            self.cycle()
+        self.assertEqual((self.row()["enabled"], self.row()["review_required"]), (0, 1))
+        self.cycle()
+        self.store.preserve.assert_called_once()
+        self.assertEqual(self.store.writes, [])
+
     def test_new_preview_is_not_erased_by_old_task(self):
         self.add()
         push = self.store.push

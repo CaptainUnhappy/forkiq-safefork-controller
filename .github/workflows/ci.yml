@@ -48,8 +48,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: docker build --pull -t forkiq-safefork-controller:ci .
-      - run: python3 deploy/container_smoke.py --image forkiq-safefork-controller:ci
+      - run: docker build --pull --label org.opencontainers.image.revision=${{ github.sha }} -t forkiq-safefork-controller:${{ github.sha }} .
+      - run: python3 deploy/container_smoke.py --image forkiq-safefork-controller:${{ github.sha }} --memory-mib 128 --report dist/image/smoke.json
       - name: Check runtime image contents
         run: |
-          docker run --rm --entrypoint python forkiq-safefork-controller:ci -c 'from pathlib import Path; p=Path("/opt/forkiq"); forbidden={".pem",".key",".db",".sqlite",".bundle",".pyc"}; assert not any(f.suffix in forbidden or f.name.startswith(".env") for f in p.rglob("*") if f.is_file()); assert not (p/".git").exists(); assert not (p/"app/restore.py").exists(); print("PASS: no runtime secrets, database, Git metadata or rollback module in application image")'
+          docker run --rm --entrypoint python forkiq-safefork-controller:${{ github.sha }} -c 'from pathlib import Path; p=Path("/opt/forkiq"); forbidden={".pem",".key",".db",".sqlite",".bundle",".pyc"}; assert not any(f.suffix in forbidden or f.name.startswith(".env") for f in p.rglob("*") if f.is_file()); assert not (p/".git").exists(); assert not (p/"app/restore.py").exists(); print("PASS: no runtime secrets, database, Git metadata or rollback module in application image")'
+      - name: Export verified image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker save forkiq-safefork-controller:${{ github.sha }} | gzip -1 > dist/image/controller-image.tar.gz
+          docker image inspect forkiq-safefork-controller:${{ github.sha }} > dist/image/image.json
+          cd dist/image
+          sha256sum controller-image.tar.gz image.json smoke.json > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: controller-image-${{ github.sha }}
+          path: dist/image/
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error

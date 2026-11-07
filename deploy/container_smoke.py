@@ -2,6 +2,7 @@
 import argparse
 import http.cookiejar
 import json
+from pathlib import Path
 import subprocess
 import time
 import urllib.parse
@@ -25,7 +26,7 @@ def wait_healthy(origin):
     raise RuntimeError("Container worker did not become healthy")
 
 
-def check(image):
+def check(image, memory_mib=128, report=None):
     nonce = uuid.uuid4().hex
     name, volume = "safefork-test-" + nonce, "safefork-state-" + nonce
     container = None
@@ -33,8 +34,10 @@ def check(image):
     try:
         container = docker("run", "-d", "--name", name, "--label", "safefork-test=" + nonce,
                            "--read-only", "--tmpfs", "/tmp:size=64m,mode=1777", "--cap-drop=ALL",
-                           "--security-opt=no-new-privileges:true", "--memory=512m", "--cpus=1", "--pids-limit=64",
+                           "--security-opt=no-new-privileges:true", f"--memory={memory_mib}m", f"--memory-swap={memory_mib}m",
+                           "--cpus=1", "--pids-limit=64",
                            "-p", "127.0.0.1::8792", "-v", volume + ":/var/lib/forkiq",
+                           "--mount", f"type=bind,source={Path(__file__).resolve().parents[1] / 'tests'},target=/opt/controller-tests,readonly",
                            "-e", "FORKIQ_PUBLIC_URL=https://fixture.example.invalid", image)
         address = docker("port", container, "8792/tcp").splitlines()[0]
         origin = "http://" + address
@@ -42,7 +45,7 @@ def check(image):
         assert docker("exec", container, "id", "-u") == "10001"
         info = json.loads(docker("inspect", container))[0]
         assert info["HostConfig"]["ReadonlyRootfs"] is True
-        assert info["HostConfig"]["Memory"] == 512 * 1024 ** 2
+        assert info["HostConfig"]["Memory"] == memory_mib * 1024 ** 2
         cookies = http.cookiejar.CookieJar()
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
         def request(path, data=None):
@@ -56,6 +59,15 @@ def check(image):
         _, page = request("/login", {"password": fixture_password})
         assert "概览" in page
         print("PASS: cold start and login", flush=True)
+        # Run actual Git fetch/archive/push tests alongside the live web worker.
+        docker("exec", container, "mkdir", "-p", "/var/lib/forkiq/smoke-tmp")
+        docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
+               container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_safefork.py")
+        peak = int(docker("exec", container, "python", "-c",
+                          "from pathlib import Path; p=Path('/sys/fs/cgroup/memory.peak'); "
+                          "p=p if p.exists() else Path('/sys/fs/cgroup/memory/memory.max_usage_in_bytes'); print(p.read_text())"))
+        assert peak <= memory_mib * 1024 ** 2
+        print(f"PASS: real Git and persistent archive tests; cgroup peak {peak} bytes under {memory_mib} MiB", flush=True)
         # Restart with the same mounted volume and verify the setup and session survive.
         docker("restart", container)
         # An automatically allocated host port may change across restarts.
@@ -72,7 +84,14 @@ def check(image):
                           "print(c.execute('SELECT count(*) FROM repositories').fetchone()[0]); "
                           "print(c.execute(\"SELECT count(*) FROM settings WHERE key='github_installation_id'\").fetchone()[0])")
         assert settings.splitlines() == ["0", "0"]
-        print("PASS: non-root cold start, live worker, read-only root, 512 MiB limit, volume restart, no GitHub credentials/repos")
+        state = json.loads(docker("inspect", "--format", "{{json .State}}", container))
+        assert state["OOMKilled"] is False
+        if report:
+            Path(report).parent.mkdir(parents=True, exist_ok=True)
+            Path(report).write_text(json.dumps({"image": image, "memory_limit_mib": memory_mib,
+                                               "peak_bytes": peak, "git_tests": "passed", "restart": "passed",
+                                               "production_credentials": False}, indent=2) + "\n", encoding="utf-8")
+        print(f"PASS: non-root cold start, live worker, read-only root, {memory_mib} MiB limit, volume restart, no GitHub credentials/repos")
     except BaseException:
         if container:
             # This uniquely created container has only synthetic credentials.
@@ -91,4 +110,7 @@ def check(image):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="forkiq-safefork-controller:local")
-    check(parser.parse_args().image)
+    parser.add_argument("--memory-mib", type=int, choices=range(96, 1025), default=128)
+    parser.add_argument("--report")
+    args = parser.parse_args()
+    check(args.image, args.memory_mib, args.report)

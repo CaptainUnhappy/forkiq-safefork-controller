@@ -12,6 +12,8 @@
 - 可显式登记 `main → upstream-main`，旧 `main` 保持不动。目标独有分支、归档和 `sync-control` 保留。
 - 已审核标签差异只能按“标签名、目标原始 SHA、上游原始 SHA”固定登记；旧标签不动，任一 SHA 变化后重新停写。
 - 新登记仓库保持暂停。先只读预览，10 分钟内确认后才启用；每次写入仍重新检查。失败、结果不确定或写入时崩溃后不会自动重试。
+- 正式同步先保存服务器裸 Git 仓库，再推送 GitHub。副本位于持久状态卷的 `repositories/<目标仓库ID>.git`，包含完整拟同步历史与目标独有引用；同步临时目录清理或容器重启不会删除它。副本保存失败就不推送 GitHub，GitHub 推送失败也不回退服务器副本。
+- 已保存的服务器分支同样只能快进、标签不能移动、本地独有引用不删除。预览只检查，不创建或修改持久副本。服务器独有引用不会自动上传到被人另行删改过的 GitHub 目标，需人工审查恢复范围。
 
 这些规则保存的是 Git 历史，不是整个 GitHub 项目的全量备份：不包含 Git LFS 实体、子模块仓库、Issues、Release 附件、Actions 数据或 GitHub 设置。普通快进也可能含不良代码；本工具不审查代码质量或保证项目内容安全。
 
@@ -39,6 +41,8 @@
 ## Docker 启动
 
 需要可用的 Docker Engine / Compose、GitHub 出站网络，以及你控制的 HTTPS 根地址。容量取决于各仓库完整历史大小；同步串行进行，每次使用临时裸仓库，至少保留 1 GiB 可用空间，且还要容纳源、目标历史及 Git 运算峰值。Compose 的 512 MiB 内存限制不是适用所有仓库的容量承诺。
+
+CI 同时提供按提交命名的已验证镜像 artifact（保留 7 天），包含 `controller-image.tar.gz`、`image.json`、`smoke.json` 和 `SHA256SUMS`。资源较少的主机可在核对提交、CI 结论及校验和后 `docker load`，无需现场构建。容器测试用 128 MiB 硬限制运行 Web worker 和真实小 Git 任务，并记录峰值；该结果只适用于合成小仓库，生产仓库仍须单独测量。
 
 ```sh
 export FORKIQ_PUBLIC_URL=https://fork.example.com
@@ -68,6 +72,8 @@ docker compose -f compose.yaml -f compose.private.example.yaml up -d
 路径必须已存在，配置不会自动创建目录；不要把整个用户主目录或其他无关密钥目录挂载进去。
 
 持久状态在 `state` 卷；App 私钥默认位于其中。首次连接后可将私钥迁至单独受控的只读挂载，并设置 `FORKIQ_PEM_PATH`；之后不能直接从页面覆写只读私钥，轮换须停写并受控更换。备份状态应停机或使用 SQLite 一致性备份，不能只复制运行中的 `.db` 而忽略 WAL；含私钥的备份须加密、限制访问。
+
+需要离线读取时，在受控 SSH/主机权限下使用普通 `git clone /实际状态目录/repositories/<ID>.git`；不要执行 `docker compose down -v` 或删除状态卷。副本 HEAD 指向登记的主分支（有映射时指向映射分支）。不要手动改写副本 refs、配置或身份文件；意外变化会停写，不能强推“修复”。
 
 ## 故障处理
 

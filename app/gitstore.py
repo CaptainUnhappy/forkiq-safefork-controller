@@ -87,19 +87,27 @@ class GitStore:
                        GIT_CONFIG_VALUE_0="Authorization: Basic " + auth)
         return env
 
-    def run(self, *args, side=None, allowed=(0,), hooks=None):
+    def run(self, *args, side=None, allowed=(0,), hooks=None, local=False):
+        if local and side is not None:
+            raise SyncBlocked("本地保存不能附带远端凭据。")
         settings = ("credential.helper=", "core.hooksPath=" + str(hooks or self.path / "no-hooks"),
                     "init.templateDir=", "protocol.allow=never", "protocol.https.allow=always",
                     "http.followRedirects=false", "gc.auto=0", "maintenance.auto=false",
                     "fetch.fsckObjects=true", "transfer.fsckObjects=true", "pack.threads=1",
-                    "pack.windowMemory=16m", "pack.deltaCacheSize=8m", "pack.window=5")
+                    "pack.windowMemory=16m", "pack.deltaCacheSize=8m", "pack.window=5",
+                    "core.fsync=committed", "core.deltaBaseCacheLimit=8m")
         command = ["git"]
         for setting in settings:
             command += ["-c", setting]
+        env = self.env(side)
+        if local:
+            # Only controller-owned archive/temporary paths use the file transport.
+            env["GIT_ALLOW_PROTOCOL"] = "file"
+            command += ["-c", "protocol.file.allow=always"]
         command += list(args)
         # Output never includes stderr, command arguments or credentials in errors.
         with tempfile.TemporaryFile() as output:
-            proc = subprocess.Popen(command, cwd=self.path, env=self.env(side),
+            proc = subprocess.Popen(command, cwd=self.path, env=env,
                                     stdin=subprocess.DEVNULL, stdout=output,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
             try:
@@ -116,7 +124,8 @@ class GitStore:
                 proc.wait()
                 raise SyncBlocked("Git 操作超时；若已推送，须核对远端结果后再恢复。") from None
             if code not in allowed:
-                raise SyncBlocked("Git 操作失败（" + args[0] + "），请检查权限、引用与磁盘；不会强推。")
+                operation = args[1] if args[0].startswith("--git-dir=") else args[0]
+                raise SyncBlocked("Git 操作失败（" + operation + "），请检查权限、引用与磁盘；不会强推。")
             output.seek(0)
             data = output.read(16 * 1024 * 1024 + 1)
             if len(data) > 16 * 1024 * 1024:
@@ -158,6 +167,109 @@ class GitStore:
     def files(self, sha):
         _, value = self.run("ls-tree", "-r", "--name-only", "-z", sha)
         return set(value.rstrip("\0").split("\0")) if value else set()
+
+    @staticmethod
+    def _linked(path):
+        try:
+            return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0) & 0x400)
+        except FileNotFoundError:
+            return False
+
+    def archive_path(self, config):
+        target_id = config.get("target_id")
+        if type(target_id) is not int or target_id <= 0:
+            raise SyncBlocked("持久仓库缺少有效目标 ID。")
+        root = self.root.absolute()
+        if any(self._linked(item) for item in (root, *root.parents)):
+            raise SyncBlocked("持久状态目录不能经过符号链接。")
+        parent = root / "repositories"
+        path = parent / f"{target_id}.git"
+        for item in (root, parent, path):
+            if self._linked(item) or (item.exists() and not item.is_dir()):
+                raise SyncBlocked("持久仓库路径不是受控目录，已停写。")
+        return path
+
+    @staticmethod
+    def archive_binding(config):
+        return {key: config[key] for key in ("source", "source_id", "target", "target_id", "mode")}
+
+    def archive_refs(self, config):
+        path = self.archive_path(config)
+        if not path.exists():
+            return {}
+        binding = path / "safefork-identity.json"
+        for item in (binding, path / "config", path / "HEAD", path / "objects", path / "refs"):
+            if self._linked(item):
+                raise SyncBlocked("持久仓库包含链接路径，已停写。")
+        try:
+            saved = json.loads(binding.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise SyncBlocked("持久仓库缺少有效身份记录，不能接管已有目录。") from None
+        if saved != self.archive_binding(config):
+            raise SyncBlocked("持久仓库身份与登记不一致，不能复用或覆盖。")
+        if (path / "shallow").exists() or (path / "objects/info/alternates").exists():
+            raise SyncBlocked("持久仓库不是独立完整历史，已停写。")
+        prefix = "--git-dir=" + str(path)
+        if self.run(prefix, "rev-parse", "--is-bare-repository", local=True)[1].strip() != "true":
+            raise SyncBlocked("持久保存目录不是裸 Git 仓库。")
+        self.run(prefix, "fsck", "--connectivity-only", "--no-dangling", local=True)
+        _, text = self.run(prefix, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/", "refs/tags/", local=True)
+        from .safefork import valid_ref, valid_sha
+        refs = {}
+        for line in text.splitlines():
+            sha, ref = line.split(" ", 1)
+            if not valid_sha(sha) or not valid_ref(ref) or ref in refs:
+                raise SyncBlocked("持久仓库引用不完整或格式错误。")
+            refs[ref] = sha
+        return refs
+
+    def archive_plan(self, config, expected):
+        """Read-only archive validation; objects are fetched only into the scratch repo."""
+        path = self.archive_path(config)
+        old = self.archive_refs(config)
+        if old:
+            self.run("fetch", "--no-tags", "--no-recurse-submodules", path.as_uri(),
+                     "refs/heads/*:refs/archive/heads/*", "refs/tags/*:refs/archive/tags/*", local=True)
+        for ref, sha in expected.items():
+            previous = old.get(ref)
+            if previous and previous != sha:
+                if ref.startswith("refs/tags/") or not self.is_ancestor(previous, sha):
+                    raise SyncBlocked("服务器已有历史不能后退或移动标签：" + ref)
+        names = set(old) | set(expected)
+        for name in names:
+            parts = name.split("/")
+            if any("/".join(parts[:i]) in names for i in range(2, len(parts))):
+                raise SyncBlocked("持久仓库与拟保存引用存在名称冲突。")
+        if self.archive_refs(config) != old:
+            raise SyncBlocked("持久仓库在检查期间变化，已停写。")
+        return {"path": f"repositories/{config['target_id']}.git", "before": old,
+                "local_only": sorted(set(old) - set(expected)), "saved": False}
+
+    def preserve(self, config, expected, archive):
+        """Save the complete planned target with ordinary atomic, non-force fetch."""
+        self.check_space()
+        path = self.archive_path(config)
+        if self.archive_refs(config) != archive["before"]:
+            raise SyncBlocked("持久仓库在写入前变化，未推送 GitHub。")
+        if not path.exists():
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.mkdir(mode=0o700)
+            with (path / "safefork-identity.json").open("x", encoding="utf-8") as handle:
+                json.dump(self.archive_binding(config), handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.run("init", "--bare", str(path), local=True)
+            primary = config.get("branch_map", {}).get(config["primary"], config["primary"])
+            self.run("--git-dir=" + str(path), "symbolic-ref", "HEAD", "refs/heads/" + primary, local=True)
+        changes = {ref: sha for ref, sha in expected.items() if archive["before"].get(ref) != sha}
+        if changes:
+            self.run("--git-dir=" + str(path), "fetch", "--atomic", "--no-tags", "--no-recurse-submodules",
+                     self.path.as_uri(), *[sha + ":" + ref for ref, sha in sorted(changes.items())], local=True)
+        wanted = {**archive["before"], **expected}
+        if self.archive_refs(config) != wanted:
+            raise SyncBlocked("服务器持久保存未完全确认，未推送 GitHub。")
+        self.check_space()
+        return {**archive, "saved": True, "ref_count": len(wanted)}
 
     def push(self, updates, expected):
         """Ordinary atomic push plus a trusted hook pinning advertised old OIDs."""

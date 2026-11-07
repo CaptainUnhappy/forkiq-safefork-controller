@@ -104,20 +104,26 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False):
                 def guard():
                     verify_live(config, source, client)
 
+                intent_saved = False
+
                 def before_write():
+                    nonlocal intent_saved
                     # One transaction serializes this gate with UI changes. Once it
                     # commits, the push is in flight; pause cannot recall Git traffic.
                     with db.transaction() as conn:
                         live = db.one("SELECT * FROM repositories WHERE id=?", (row["id"],))
                         current = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
-                        if (cancelled() or not live or not live["enabled"] or live["review_required"]
+                        expected_state = (0, 1) if intent_saved else (1, 0)
+                        if (cancelled() or not live or (live["enabled"], live["review_required"]) != expected_state
                                 or live["config_json"] != row["config_json"] or current != connection
                                 or live["control_epoch"] != row["control_epoch"]):
                             raise SyncBlocked("同步已暂停、断开或配置变化，停止写入。")
                         # Persist intent before the write. A crash must not auto-retry it.
-                        conn.execute("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',"
-                                     "last_error='推送尚未确认；中断后先预览核对。',updated_at=? WHERE id=?",
-                                     (utcnow(), row["id"]))
+                        if not intent_saved:
+                            conn.execute("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',"
+                                         "last_error='保存或推送尚未确认；中断后先预览核对，本地副本保留。',updated_at=? WHERE id=?",
+                                         (utcnow(), row["id"]))
+                            intent_saved = True
 
                 source_token = (source.installation_token if config["mode"] == "standalone-private" else lambda: "")
                 with store_type(root, config["source"], config["target"], source_token,

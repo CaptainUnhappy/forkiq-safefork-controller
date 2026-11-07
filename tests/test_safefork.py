@@ -38,6 +38,7 @@ class MemoryStore:
     def __init__(self, root=None, source=None, target=None, *tokens):
         self.state = {"source": {MAIN: B}, "target": {MAIN: A}}
         self.writes = []
+        self.archived = {}
         self.is_ancestor = Mock(return_value=True)
         self.files = Mock(return_value={"README.md", "code.py"})
     def __enter__(self):
@@ -48,6 +49,11 @@ class MemoryStore:
         return self.state[side].copy()
     def fetch(self, side, snapshot):
         pass
+    def archive_plan(self, config, expected):
+        return {"path": "repositories/22.git", "before": self.archived.copy(), "local_only": [], "saved": False}
+    def preserve(self, config, expected, archive):
+        self.archived.update(expected)
+        return {**archive, "saved": True, "ref_count": len(self.archived)}
     def push(self, updates, expected):
         self.writes.append(updates.copy())
         self.state["target"].update(updates)
@@ -58,6 +64,22 @@ class PolicyTests(unittest.TestCase):
         store = MemoryStore()
         plan = synchronize(config(), store, lambda: None)
         self.assertEqual(plan["updates"], {MAIN: B})
+        self.assertEqual(store.writes, [])
+        self.assertEqual(store.archived, {})
+
+    def test_archive_failure_prevents_remote_push(self):
+        store = MemoryStore()
+        store.preserve = Mock(side_effect=SyncBlocked("archive unavailable"))
+        with self.assertRaisesRegex(SyncBlocked, "archive unavailable"):
+            synchronize(config(), store, lambda: None, dry_run=False)
+        self.assertEqual(store.writes, [])
+
+    def test_gate_is_checked_again_after_archiving(self):
+        store = MemoryStore()
+        gate = Mock(side_effect=[None, SyncBlocked("paused after archive")])
+        with self.assertRaisesRegex(SyncBlocked, "paused after archive"):
+            synchronize(config(), store, lambda: None, dry_run=False, before_write=gate)
+        self.assertEqual(store.archived[MAIN], B)
         self.assertEqual(store.writes, [])
 
     def test_equal_and_target_only_refs_never_delete(self):
@@ -353,6 +375,127 @@ class RealGitTests(unittest.TestCase):
             refs = store.refs("target")
             self.assertEqual(refs[MAIN], old)
             self.assertEqual(refs["refs/heads/upstream-main"], new)
+
+    def test_archive_survives_context_exit_and_can_be_cloned_offline(self):
+        b = self.commit("second")
+        self.git(self.source, "tag", "-a", "v1", "-m", "immutable annotated tag")
+        self.git(self.target, "update-ref", "refs/heads/target-only", self.a)
+        with self.store() as store:
+            plan = synchronize(config(), store, lambda: None, dry_run=False)
+            expected = store.refs("target")
+            self.assertEqual(store.archive_refs(config()), expected)
+            archive = store.archive_path(config())
+            scratch = store.path
+            self.assertTrue(plan["archive"]["saved"])
+        self.assertFalse(scratch.exists())
+        self.assertTrue(archive.exists())
+        clone = self.root / "offline"
+        self.git(self.root, "clone", "--no-local", str(archive), str(clone))
+        self.assertEqual(self.git(clone, "rev-parse", "HEAD"), b)
+        self.assertEqual(self.git(clone, "rev-list", "--count", "HEAD"), "2")
+        self.assertEqual(self.git(clone, "rev-parse", "v1"), expected["refs/tags/v1"])
+
+    def test_archive_created_even_when_github_has_no_pending_changes(self):
+        with self.store() as store:
+            plan = synchronize(config(), store, lambda: None, dry_run=False)
+            self.assertEqual(plan["updates"], {})
+            self.assertEqual(store.archive_refs(config()), {MAIN: self.a})
+            self.assertTrue(plan["archive"]["saved"])
+
+    def test_dry_run_never_creates_or_changes_persistent_archive(self):
+        with self.store() as store:
+            synchronize(config(), store, lambda: None)
+            self.assertFalse((self.root / "repositories").exists())
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+            archive = store.archive_path(config())
+        before = {str(p.relative_to(archive)): p.read_bytes() for p in archive.rglob("*") if p.is_file()}
+        self.commit("second")
+        with self.store() as store:
+            synchronize(config(), store, lambda: None)
+        after = {str(p.relative_to(archive)): p.read_bytes() for p in archive.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
+
+    def test_archive_ahead_after_failed_push_cannot_be_rewound(self):
+        b = self.commit("second")
+        with self.store() as store:
+            store.push = Mock(side_effect=SyncBlocked("network lost"))
+            with self.assertRaisesRegex(SyncBlocked, "network lost"):
+                synchronize(config(), store, lambda: None, dry_run=False)
+            self.assertEqual(store.archive_refs(config())[MAIN], b)
+            self.assertEqual(store.refs("target")[MAIN], self.a)
+        self.git(self.source, "update-ref", MAIN, self.a)
+        with self.store() as store:
+            with self.assertRaisesRegex(SyncBlocked, "服务器已有历史"):
+                synchronize(config(), store, lambda: None, dry_run=False)
+            self.assertEqual(store.archive_refs(config())[MAIN], b)
+            self.assertEqual(store.refs("target")[MAIN], self.a)
+
+    def test_archive_can_resume_after_failed_push_and_keep_local_only_ref(self):
+        b = self.commit("second")
+        self.git(self.target, "update-ref", "refs/heads/old-only", self.a)
+        with self.store() as store:
+            store.push = Mock(side_effect=SyncBlocked("network lost"))
+            with self.assertRaises(SyncBlocked):
+                synchronize(config(), store, lambda: None, dry_run=False)
+        # External deletion is simulated only in this disposable fixture.
+        self.git(self.target, "update-ref", "-d", "refs/heads/old-only")
+        with self.store() as store:
+            plan = synchronize(config(), store, lambda: None, dry_run=False)
+            self.assertEqual(store.refs("target")[MAIN], b)
+            self.assertEqual(store.archive_refs(config())["refs/heads/old-only"], self.a)
+            self.assertEqual(plan["archive"]["local_only"], ["refs/heads/old-only"])
+
+    def test_archive_tag_cannot_move_even_if_both_remotes_move(self):
+        self.git(self.source, "tag", "v1")
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+        b = self.commit("second")
+        self.git(self.source, "update-ref", "refs/tags/v1", b)
+        self.git(self.source, "push", str(self.target), "main:main")
+        self.git(self.target, "update-ref", "refs/tags/v1", b)
+        with self.store() as store:
+            with self.assertRaisesRegex(SyncBlocked, "服务器已有历史"):
+                synchronize(config(), store, lambda: None, dry_run=False)
+            self.assertEqual(store.archive_refs(config())["refs/tags/v1"], self.a)
+
+    def test_archive_identity_mismatch_and_unowned_directory_fail_closed(self):
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+            with self.assertRaisesRegex(SyncBlocked, "身份"):
+                store.archive_refs(config(source_id=99))
+            with self.assertRaises(SyncBlocked):
+                store.archive_path(config(target_id="../escape"))
+        other = self.root / "repositories/23.git"
+        other.mkdir()
+        with self.store() as store:
+            with self.assertRaisesRegex(SyncBlocked, "不能接管"):
+                store.archive_refs(config(target_id=23))
+
+    @unittest.skipIf(os.name == "nt", "Creating symlinks requires Windows developer mode or elevation")
+    def test_archive_symlink_is_rejected(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "repositories").symlink_to(outside, target_is_directory=True)
+        with self.store() as store:
+            with self.assertRaisesRegex(SyncBlocked, "受控目录"):
+                synchronize(config(), store, lambda: None, dry_run=False)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_archive_race_before_save_stops_github_push(self):
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+        self.commit("second")
+        with self.store() as store:
+            original = store.preserve
+            def concurrent_change(cfg, expected, archive):
+                self.git(store.archive_path(cfg), "update-ref", "refs/heads/external", self.a)
+                return original(cfg, expected, archive)
+            store.preserve = concurrent_change
+            store.push = Mock()
+            with self.assertRaisesRegex(SyncBlocked, "写入前变化"):
+                synchronize(config(), store, lambda: None, dry_run=False)
+            store.push.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@
     <dt>显式映射</dt><dd>{% for source, target in config.branch_map.items() %}<div><code>{{ source }}</code> → <code>{{ target }}</code>；旧 {{ source }} 保留</div>{% else %}同名同步{% endfor %}</dd>
     <dt>最近检查</dt><dd>{{ timestamp(repo.last_check_at) }}</dd>
     <dt>最近同步核对</dt><dd>{{ timestamp(repo.last_success_at) }}</dd>
+    <dt>服务器副本</dt><dd><code>repositories/{{ config.target_id }}.git</code>（位于持久状态卷，正式同步后建立）</dd>
   </dl>
   {% else %}<p class="notice warn">旧版记录尚未迁移。不要直接恢复，请在离线副本中审核并登记固定身份和映射。</p>{% endif %}
   <p class="field-help">范围为 Git 分支、原始标签对象及可达历史，不含 LFS 实体、子模块内容、Issues、Release 附件或 GitHub 设置。不是整个项目的全量备份。</p>
@@ -40,6 +41,7 @@
 {% if plan %}
 <section class="card">
   <h2>最近引用检查</h2><p>{{ timestamp(plan.checked_at) }} · {{ plan.decisions|length }} 个源引用；{{ plan.target_only|length }} 个目标独有引用保留。</p>
+  {% if plan.archive %}<p>{{ '服务器副本已核对' if plan.archive.saved else '只读预览，尚未写入服务器副本' }}；另保留 {{ plan.archive.local_only|length }} 个服务器独有引用。</p>{% endif %}
   <div class="table-wrap" role="region" aria-label="同步引用计划" tabindex="0"><table>
     <thead><tr><th>来源 → 目标</th><th>决策</th><th>计划目标 SHA</th></tr></thead><tbody>
     {% for item in plan.decisions %}<tr><td><code>{{ item.source }}</code><br><code>{{ item.target }}</code></td><td>{{ {'create':'创建','equal':'相同','fast-forward':'快进','preserved':'已审核保留原标签'}[item.action] }}</td><td><code>{{ item.old if item.action == 'preserved' else item.new }}</code>{% if item.action == 'preserved' %}<br>上游：<code>{{ item.new }}</code>{% endif %}</td></tr>{% endfor %}
