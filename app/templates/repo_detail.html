@@ -1,23 +1,23 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon, status, event_kind, repo_link, timestamp %}
+{% from "components.html" import icon, status, event_kind, repo_link, timestamp with context %}
 {% set active_page = "repos" %}
 {% block title %}ForkIQ · SafeFork{% endblock %}
 {% block page_title %}{{ repo.full_name }}{% endblock %}
 {% block header_actions %}{{ status(repo.status) }}{% endblock %}
 {% block content %}
-<a class="back-link" href="/repos">返回仓库列表</a>
+<a class="back-link" href="{{ base_path }}/repos">返回仓库列表</a>
 {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
 {% if repo.last_error %}<p id="repo-error" class="notice warn" role="alert">{{ repo.last_error }}</p>{% endif %}
 <section class="card">
   <h2>安全同步</h2>
   <p>所有分支仅创建或快进；已有标签和归档不改动。来源变化、冲突或目标 Actions 开启时停止，不能通过重试绕过。</p>
   <div class="actions">
-    <form method="post" action="/repos/{{ repo.id }}/preview"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">只读预览（暂停写入）</button></form>
+    <form method="post" action="{{ base_path }}/repos/{{ repo.id }}/preview"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">只读预览（暂停写入）</button></form>
     {% if repo.enabled %}
-    <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">立即安全同步</button></form>
-    <form method="post" action="/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">暂停</button></form>
+    <form method="post" action="{{ base_path }}/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">立即安全同步</button></form>
+    <form method="post" action="{{ base_path }}/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">暂停</button></form>
     {% elif plan and not repo.review_required %}
-    <form method="post" action="/repos/{{ repo.id }}/resume" class="confirm" data-confirm="按已预览的来源与映射启用同步？每次写入仍会重新核对，目标 Actions 必须保持关闭。"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ review }}"><button class="primary">确认计划并启用同步</button></form>
+    <form method="post" action="{{ base_path }}/repos/{{ repo.id }}/resume" class="confirm" data-confirm="按已预览的来源与映射启用同步？每次写入仍会重新核对，目标 Actions 必须保持关闭。"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="review" value="{{ review }}"><button class="primary">确认计划并启用同步</button></form>
     {% endif %}
   </div>
   <p class="field-help">预览异步执行，请刷新查看结果。成功预览 10 分钟内可确认。暂停不会中断已发出的 Git 请求；结果会核对并保持暂停。</p>

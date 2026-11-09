@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import icon %}
+{% from "components.html" import icon with context %}
 {% block title %}ForkIQ · 登录{% endblock %}
 {% block bodyclass %}auth-page{% endblock %}
 {% block body %}
@@ -8,7 +8,7 @@
     <div class="auth-brand">{{ icon('git-fork') }}<span>ForkIQ</span></div>
     <h1>登录管理面板</h1>
     <p class="auth-description">查看仓库状态，跟进上游更新。</p>
-    <form method="post" action="/login" class="stacked-form">
+    <form method="post" action="{{ base_path }}/login" class="stacked-form">
       {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
       <label for="password">管理员密码</label>
       <input id="password" type="password" name="password" autocomplete="current-password" placeholder="请输入管理员密码" required autofocus>

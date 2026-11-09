@@ -1,11 +1,11 @@
 {% extends "auth.html" %}
 {% block title %}ForkIQ · 安装 App{% endblock %}
 {% block auth_title %}安装到 GitHub 账号{% endblock %}
-{% block auth_description %}<p class="auth-description">完成安装后，ForkIQ 就能检查上游并同步仓库。</p>{% endblock %}
+{% block auth_description %}<p class="auth-description">安装完成后，还需逐库登记、预览并确认启用同步。</p>{% endblock %}
 {% block auth_content %}
   <ol class="connect-steps"><li>打开安装页，选择 Only select repositories，仅勾选本次要托管的目标仓库。</li><li>安装完成后返回，点击检测；仓库需逐一登记并预览后启用。</li></ol>
   <a class="secondary link auth-submit" href="{{ install_url }}" target="_blank" rel="noopener">打开 GitHub 安装页{{ icon('arrow-right') }}</a>
-  <form method="post" action="/github/detect" class="stacked-form">
+  <form method="post" action="{{ base_path }}/github/detect" class="stacked-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="primary auth-submit" type="submit">我已安装，检测{{ icon('refresh-cw') }}</button>
   </form>

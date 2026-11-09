@@ -1,10 +1,18 @@
-{% from "components.html" import event_kind, repo_link, timestamp, error_message %}
+{% from "components.html" import event_kind, repo_link, timestamp, error_message with context %}
+{% if not total %}
+<section class="card">
+  <h2>{{ 'GitHub App 已连接，尚未登记仓库' if app_connected else '尚未登记仓库' }}</h2>
+  <p>这里仅显示由本控制器登记、检查的仓库，不会自动导入 GitHub Actions 的同步状态。</p>
+  {% if app_connected %}<p><a href="{{ base_path }}/repos#register-repo">登记已有 SafeFork</a> 后先只读预览；确认启用后才会同步。接管前须停用原同步任务并关闭目标 Actions，避免两边同时写入。</p>
+  {% else %}<p><a href="{{ base_path }}/github/connect">连接专用 GitHub App</a>，再逐库登记和预览。</p>{% endif %}
+</section>
+{% endif %}
 <section class="stats card" id="stats-region" data-revision="{{ revision }}">
-  <a class="stat" href="/repos"><span class="num">{{ total }}</span><span class="label">受管仓库</span></a>
-  <a class="stat ok" href="/repos?filter=synced"><span class="num">{{ synced }}</span><span class="label">已同步</span></a>
-  <a class="stat" href="/repos?filter=waiting"><span class="num">{{ behind }}</span><span class="label">待同步</span></a>
-  <a class="stat warn" href="/repos?filter=attention"><span class="num">{{ blocked }}</span><span class="label">需关注</span></a>
-  <a class="stat" href="/repos?filter=paused"><span class="num">{{ paused }}</span><span class="label">已暂停</span></a>
+  <a class="stat" href="{{ base_path }}/repos"><span class="num">{{ total }}</span><span class="label">受管仓库</span></a>
+  <a class="stat ok" href="{{ base_path }}/repos?filter=synced"><span class="num">{{ synced }}</span><span class="label">已同步</span></a>
+  <a class="stat" href="{{ base_path }}/repos?filter=waiting"><span class="num">{{ behind }}</span><span class="label">待同步</span></a>
+  <a class="stat warn" href="{{ base_path }}/repos?filter=attention"><span class="num">{{ blocked }}</span><span class="label">需关注</span></a>
+  <a class="stat" href="{{ base_path }}/repos?filter=paused"><span class="num">{{ paused }}</span><span class="label">已暂停</span></a>
 </section>
 <section class="card" id="events-region">
   <h2>最近事件</h2>
@@ -16,5 +24,5 @@
         <td>{{ repo_link(e.full_name) }}</td><td>{{ error_message(e.message) if e.kind in ('error', 'blocked', 'auth') else e.message }}</td></tr>
     {% endfor %}
   </table></div>
-  {% else %}<p class="muted">还没有事件。连接 GitHub 后会自动开始检查。</p>{% endif %}
+  {% else %}<p class="muted">还没有事件。登记仓库并运行只读预览后，这里会显示检查结果。</p>{% endif %}
 </section>

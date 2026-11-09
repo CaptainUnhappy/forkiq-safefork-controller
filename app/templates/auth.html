@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% from "components.html" import icon %}
+{% from "components.html" import icon with context %}
 {% block bodyclass %}auth-page{% endblock %}
 {% block body %}
 <main class="auth-layout" id="main-content" tabindex="-1">
   <div class="auth-card card auth-wide">
-    <a class="auth-brand" href="/">{{ icon('git-fork') }}<span>ForkIQ</span></a>
+    <a class="auth-brand" href="{{ base_path }}/">{{ icon('git-fork') }}<span>ForkIQ</span></a>
     <h1>{% block auth_title %}ForkIQ{% endblock %}</h1>
     {% block auth_description %}{% endblock %}
     {% block auth_content %}{% endblock %}

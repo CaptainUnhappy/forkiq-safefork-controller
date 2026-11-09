@@ -1,17 +1,17 @@
 {% extends "shell.html" %}
-{% from "components.html" import icon %}
+{% from "components.html" import icon with context %}
 {% set active_page = "overview" %}
 {% set page_icon = "layout-dashboard" %}
 {% set auto_refresh = 30 %}
 {% set refresh_region = "overview-regions" %}
 {% block title %}ForkIQ · 概览{% endblock %}
 {% block page_title %}概览{% endblock %}
-{% block header_actions %}<a class="secondary link" href="/repos">登记与检查仓库</a>{% endblock %}
+{% block header_actions %}<a class="secondary link" href="{{ base_path }}/repos">登记与检查仓库</a>{% endblock %}
 {% block content %}
     <div class="page-intro"><h2>同步概况</h2><p class="muted">上游更新、仓库状态与同步记录，一目了然。</p></div>
     {% if not app_connected %}
-      <div class="notice warn">尚未连接 GitHub App。<a href="/github/connect">现在连接</a></div>
+      <div class="notice warn">尚未连接 GitHub App。<a href="{{ base_path }}/github/connect">现在连接</a></div>
     {% endif %}
     {% if auth_error %}<div class="notice warn">GitHub 认证异常：{{ auth_error }}</div>{% endif %}
-    <div id="overview-regions" data-refresh-url="/partials/overview">{% include "partials/overview_regions.html" %}</div>
+    <div id="overview-regions" data-refresh-url="{{ base_path }}/partials/overview">{% include "partials/overview_regions.html" %}</div>
 {% endblock %}

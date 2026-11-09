@@ -26,7 +26,29 @@ PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", str(STATE_DIR / "app.pem"))
 BASE = Path(__file__).parent
 SESSION_TTL = 7 * 86400
 MANIFEST_URL = "https://github.com/settings/apps/new"
-app = FastAPI(title="ForkIQ SafeFork", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def public_url():
+    value = os.environ.get("FORKIQ_PUBLIC_URL", "")
+    try:
+        parsed = urlsplit(value)
+        path = parsed.path.removesuffix("/")
+        if (any(c.isspace() or ord(c) < 32 for c in value) or parsed.scheme != "https"
+                or not parsed.hostname or parsed.username is not None or parsed.password is not None
+                or not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*", path) or "?" in value or "#" in value
+                or "\\" in value or "%" in parsed.netloc or parsed.netloc.endswith(":")):
+            raise ValueError
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise ValueError("FORKIQ_PUBLIC_URL 必须为 HTTPS 地址；可含 /SafeFork 这样的路径，不含账号、查询或片段。") from None
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+# The proxy preserves the public path; ASGI root_path removes it for routing
+# and supplies it to links. Never trust a client X-Forwarded-Prefix header.
+ROOT_PATH = urlsplit(public_url()).path if os.environ.get("FORKIQ_PUBLIC_URL") else ""
+app = FastAPI(title="ForkIQ SafeFork", root_path=ROOT_PATH, docs_url=None, redoc_url=None, openapi_url=None)
 templates = Jinja2Templates(directory=BASE / "templates")
 templates.env.filters["short_time"] = short_time
 templates.env.filters["error_guidance"] = error_guidance
@@ -58,24 +80,38 @@ def csrf_for(token):
     return hmac.new(token.encode(), b"forkiq-csrf", hashlib.sha256).hexdigest()
 
 
+def base_path(request):
+    return request.scope.get("root_path", "").rstrip("/")
+
+
+def session_cookie(request):
+    prefix = base_path(request)
+    # Distinguish legacy root cookies from path-scoped cookies on the same host.
+    return "forkiq_session" + ("_" + hashlib.sha256(prefix.encode()).hexdigest()[:12] if prefix else "")
+
+
+def redirect(request, path):
+    return RedirectResponse(base_path(request) + path, status_code=302)
+
+
 def current_session(request):
-    token = request.cookies.get("forkiq_session")
+    token = request.cookies.get(session_cookie(request))
     row = db.one("SELECT * FROM sessions WHERE token=?", (token,)) if token else None
     return row if row and row["expires_at"] > time.time() else None
 
 
 def render(request, name, **context):
-    token = request.cookies.get("forkiq_session", "")
+    token = request.cookies.get(session_cookie(request), "")
     context.update(csrf=csrf_for(token) if token else "", setup_done=db.get_setting("setup_done") == "1",
-                   asset_version=ASSET_VERSION)
+                   asset_version=ASSET_VERSION, base_path=base_path(request))
     return templates.TemplateResponse(request, name, context)
 
 
 def require_login(request):
     if db.get_setting("setup_done") != "1":
-        return RedirectResponse("/setup", status_code=302)
+        return redirect(request, "/setup")
     if not current_session(request):
-        return RedirectResponse("/login", status_code=302)
+        return redirect(request, "/login")
 
 
 def check_csrf(request, token):
@@ -114,14 +150,14 @@ def healthz():
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
     if db.get_setting("setup_done") == "1":
-        return RedirectResponse("/", status_code=302)
+        return redirect(request, "/")
     return render(request, "setup.html", error=None)
 
 
 @app.post("/setup", response_class=HTMLResponse)
 def setup_submit(request: Request, password: str = Form(""), password2: str = Form("")):
     if db.get_setting("setup_done") == "1":
-        return RedirectResponse("/", status_code=302)
+        return redirect(request, "/")
     if len(password) < 12 or len(password) > 1024:
         return render(request, "setup.html", error="密码需为 12–1024 位")
     if password != password2:
@@ -134,7 +170,7 @@ def setup_submit(request: Request, password: str = Form(""), password2: str = Fo
         conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('admin_pass_hash',?)", (hashed,))
         conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('setup_done','1')")
     log_event(db, None, "auth", "管理员密码已设置")
-    return RedirectResponse("/login", status_code=302)
+    return redirect(request, "/login")
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -145,7 +181,7 @@ def login_page(request: Request):
 @app.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, password: str = Form("")):
     if db.get_setting("setup_done") != "1":
-        return RedirectResponse("/setup", status_code=302)
+        return redirect(request, "/setup")
     ip = request.client.host if request.client else "unknown"
     now = time.time()
     failures = [t for t in _login_failures.get(ip, []) if now - t < 60]
@@ -158,10 +194,10 @@ def login_submit(request: Request, password: str = Form("")):
     _login_failures.pop(ip, None)
     token = secrets.token_urlsafe(32)
     db.run("INSERT INTO sessions(token,created_at,expires_at) VALUES(?,?,?)", (token, now, now + SESSION_TTL))
-    response = RedirectResponse("/", status_code=302)
-    response.set_cookie("forkiq_session", token, httponly=True,
+    response = redirect(request, "/")
+    response.set_cookie(session_cookie(request), token, httponly=True,
                         secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https",
-                        samesite="lax", max_age=SESSION_TTL)
+                        samesite="lax", max_age=SESSION_TTL, path=base_path(request) + "/")
     return response
 
 
@@ -170,26 +206,10 @@ def logout(request: Request, csrf: str = Form("")):
     denied = form_guard(request, csrf)
     if denied:
         return denied
-    db.run("DELETE FROM sessions WHERE token=?", (request.cookies.get("forkiq_session"),))
-    response = RedirectResponse("/login", status_code=302)
-    response.delete_cookie("forkiq_session")
+    db.run("DELETE FROM sessions WHERE token=?", (request.cookies.get(session_cookie(request)),))
+    response = redirect(request, "/login")
+    response.delete_cookie(session_cookie(request), path=base_path(request) + "/")
     return response
-
-
-def public_url():
-    value = os.environ.get("FORKIQ_PUBLIC_URL", "")
-    try:
-        parsed = urlsplit(value)
-        if (any(c.isspace() or ord(c) < 32 for c in value) or parsed.scheme != "https"
-                or not parsed.hostname or parsed.username is not None or parsed.password is not None
-                or parsed.path not in ("", "/") or "?" in value or "#" in value
-                or "\\" in value or "%" in parsed.netloc or parsed.netloc.endswith(":")):
-            raise ValueError
-        if parsed.port is not None and not 1 <= parsed.port <= 65535:
-            raise ValueError
-    except (ValueError, UnicodeError):
-        raise ValueError("FORKIQ_PUBLIC_URL 必须是本实例的 HTTPS 根地址，不含账号或子路径。") from None
-    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def manifest_payload():
@@ -256,7 +276,7 @@ def github_detect(request: Request, csrf: str = Form("")):
     except Exception:
         return github_connection_page(request, "请确保此专用 App 只有一个获批安装；不能自动选择账号。")
     db.set_setting("github_installation_id", installations[0]["id"])
-    return RedirectResponse("/repos", status_code=302)
+    return redirect(request, "/repos")
 
 
 def _rows(filter=""):
@@ -272,7 +292,9 @@ def _revision(rows):
 
 def _repo_list_context(filter=""):
     rows = _rows(filter)
-    return {"repos": annotate(rows), "filter": filter, "revision": _revision(rows), "auto_discover": False}
+    connected = bool(db.get_setting("github_installation_id"))
+    return {"repos": annotate(rows), "filter": filter, "revision": _revision(rows) + str(connected),
+            "auto_discover": False, "app_connected": connected}
 
 
 def _overview_context():
@@ -282,7 +304,7 @@ def _overview_context():
     return {"total": len(rows), "synced": counts["synced"], "behind": counts["waiting"],
             "blocked": counts["attention"], "paused": counts["paused"], "events": events,
             "auth_error": "", "app_connected": bool(db.get_setting("github_installation_id")),
-            "revision": _revision(rows) + _revision(events)}
+            "revision": _revision(rows) + _revision(events) + str(bool(db.get_setting("github_installation_id")))}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -343,7 +365,7 @@ def repo_add(request: Request, csrf: str = Form(""), source: str = Form(""), tar
     except Exception as error:
         message = str(error) if isinstance(error, SyncBlocked) else "无法核实仓库，请检查身份、权限和输入；未加入同步。"
         return render(request, "repos.html", **_repo_list_context(), add_error=message)
-    return RedirectResponse(f"/repos/{repo_id}", status_code=302)
+    return redirect(request, f"/repos/{repo_id}")
 
 
 def review_token(plan):
@@ -397,7 +419,7 @@ def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""
     log_event(db, repo_id, "check", {"pause": "已暂停", "preview": "只读预览已排队，保持暂停",
                                     "resume": "已确认计划并启用安全同步", "sync": "安全同步已排队"}[action])
     worker.request_sync()
-    return RedirectResponse(f"/repos/{repo_id}", status_code=302)
+    return redirect(request, f"/repos/{repo_id}")
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -420,7 +442,7 @@ def settings_save(request: Request, csrf: str = Form(""), interval_minutes: str 
     except ValueError:
         return JSONResponse({"error": "检查间隔需为 1–1440 分钟。"}, status_code=400)
     db.set_setting("check_interval", round(value * 60))
-    return RedirectResponse("/settings?notice=设置已保存", status_code=302)
+    return redirect(request, "/settings?notice=设置已保存")
 
 
 @app.post("/settings/password")
@@ -430,10 +452,10 @@ def settings_password(request: Request, csrf: str = Form(""), current: str = For
     if denied:
         return denied
     if not verify_password(current, db.get_setting("admin_pass_hash", "")) or not 12 <= len(password) <= 1024 or password != password2:
-        return RedirectResponse("/settings?notice=当前密码不正确或新密码不符合要求", status_code=302)
+        return redirect(request, "/settings?notice=当前密码不正确或新密码不符合要求")
     db.set_setting("admin_pass_hash", hash_password(password))
     db.run("DELETE FROM sessions")
-    return RedirectResponse("/login", status_code=302)
+    return redirect(request, "/login")
 
 
 @app.post("/settings/disconnect")
@@ -443,4 +465,4 @@ def settings_disconnect(request: Request, csrf: str = Form("")):
         return denied
     db.set_setting("github_installation_id", "")
     db.run("UPDATE repositories SET enabled=0,review_required=1,status='paused',control_epoch=control_epoch+1")
-    return RedirectResponse("/settings?notice=已断开，所有仓库保持暂停", status_code=302)
+    return redirect(request, "/settings?notice=已断开，所有仓库保持暂停")

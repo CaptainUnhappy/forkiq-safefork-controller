@@ -40,7 +40,7 @@
 
 ## Docker 启动
 
-需要可用的 Docker Engine / Compose、GitHub 出站网络，以及你控制的 HTTPS 根地址。容量取决于各仓库完整历史大小；同步串行进行，每次使用临时裸仓库，至少保留 1 GiB 可用空间，且还要容纳源、目标历史及 Git 运算峰值。Compose 的 512 MiB 内存限制不是适用所有仓库的容量承诺。
+需要可用的 Docker Engine / Compose、GitHub 出站网络，以及你控制的 HTTPS 地址（可为 `/SafeFork/` 子路径）。容量取决于各仓库完整历史大小；同步串行进行，每次使用临时裸仓库，至少保留 1 GiB 可用空间，且还要容纳源、目标历史及 Git 运算峰值。Compose 的 512 MiB 内存限制不是适用所有仓库的容量承诺。
 
 CI 同时提供按提交命名的已验证镜像 artifact（保留 7 天），包含 `controller-image.tar.gz`、`image.json`、`smoke.json` 和 `SHA256SUMS`。资源较少的主机可在核对提交、CI 结论及校验和后 `docker load`，无需现场构建。容器测试用 128 MiB 硬限制运行 Web worker 和真实小 Git 任务，并记录峰值；该结果只适用于合成小仓库，生产仓库仍须单独测量。
 
@@ -53,10 +53,30 @@ docker compose ps
 
 默认仅绑定 `127.0.0.1:8792`，非 root、只读根文件系统、单 worker，无 Docker socket。首次设置完成前不要公开管理入口；先通过受控本机/SSH 隧道访问，设置至少 12 位密码，再接入自己的 HTTPS 反向代理。代理须正确设置 HTTPS 转发头，并限制管理访问；不要直接暴露容器端口。
 
+共用现有 HTTPS 443 时，将 `FORKIQ_PUBLIC_URL` 设置为 `https://你的主机/SafeFork`，重建容器以应用路径配置；状态卷必须保留。把以下 location 加到既有 HTTPS server 中，无需新建公网端口：
+
+```nginx
+location = /SafeFork { return 308 /SafeFork/; }
+location = /SafeFork/setup { return 404; }
+location ^~ /SafeFork/ {
+    # 不加末尾 /：保留请求中的 /SafeFork 前缀。
+    proxy_pass http://127.0.0.1:8792;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    access_log off;
+    error_log /dev/null;
+}
+```
+
+子路径区分大小写，仅允许字母、数字、下划线、连字符及路径分隔符。链接、表单、静态资源、状态轮询、App manifest 回调与会话 Cookie 均使用该前缀；迁移后需重新登录，不重置密码或 App。旧 App 如仍保存旧主页/回调地址，应在 GitHub App 设置中更新为新地址；已有 installation 凭据不依赖浏览器回调来同步。
+
 1. 登录面板，在 GitHub 连接页创建**专用** App，仅选择批准的目标仓库，完成安装并检测连接。
 2. 在 GitHub 人工完成目标 Actions 隔离并等候在途任务结束。
 3. 登记已有来源与目标，核对固定 ID、分支映射、标签例外与私有授权。
 4. 点击“只读预览”，刷新查看全部引用计划；确认后再启用同步。
+
+面板只展示显式登记仓库的检查结果，不导入旧 GitHub Actions 的运行历史。App 已连接但受管仓库为 0 时，表示尚未接管，不代表原仓库丢失或已经同步；不要同时开启旧 Actions 同步与新控制器。
 
 默认每轮完成后等待 60 分钟，设置范围 1–1440 分钟；不依赖 GitHub schedule，也不保证每小时必定成功。网络、限流、容量、长任务和停机均可能延迟。没有上游 webhook 授权时不能保证“上游一推即同步”。
 

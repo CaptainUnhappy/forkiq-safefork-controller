@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from html.parser import HTMLParser
 from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from app.db import DB, insert_repository, utcnow
@@ -183,7 +184,9 @@ class WebTests(unittest.TestCase):
 
     def test_invalid_origin_and_manifest_callback_rejected(self):
         self.login()
-        for value in ("http://example.invalid", "https://user:pass@example.invalid", "https://x.invalid/path", "https://x.invalid?q=1"):
+        for value in ("http://example.invalid", "https://user:pass@example.invalid", "https://x.invalid?q=1",
+                      "https://x.invalid//SafeFork", "https://x.invalid/a/../b", "https://x.invalid/%2fother",
+                      "https://x.invalid/a\\b", "https://x.invalid/a/./b"):
             with patch.dict(os.environ, FORKIQ_PUBLIC_URL=value), self.assertRaises(ValueError):
                 main.public_url()
         with patch.object(main, "exchange_manifest") as exchange:
@@ -196,6 +199,76 @@ class WebTests(unittest.TestCase):
                                     "password": "changed-password-123", "password2": "changed-password-123"}, follow_redirects=False)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM sessions")["n"], 0)
+
+    def test_subpath_manifest(self):
+        for address in ("https://controller.example.invalid/SafeFork", "https://controller.example.invalid/SafeFork/"):
+            with patch.dict(os.environ, FORKIQ_PUBLIC_URL=address):
+                _, manifest = main.manifest_payload()
+            self.assertEqual(manifest["url"], address.rstrip("/"))
+            self.assertEqual(manifest["redirect_url"], address.rstrip("/") + "/api/github/callback")
+            self.assertEqual(manifest["callback_urls"], [manifest["redirect_url"]])
+
+    def test_subpath_pages_assets_forms_polling_and_session_isolation(self):
+        class Links(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.urls = []
+            def handle_starttag(self, tag, attrs):
+                self.urls.extend(value for key, value in attrs if key in ("href", "src", "action", "data-refresh-url") and value)
+
+        prefix = "/SafeFork"
+        self.db.set_setting("setup_done", "1")
+        self.db.set_setting("admin_pass_hash", main.hash_password("test-password-123"))
+        # A root-deployment cookie must not shadow the new path-scoped session.
+        self.client.cookies.set("forkiq_session", "stale-root-session")
+        with patch.object(main.app, "root_path", prefix):
+            response = self.client.get(prefix + "/repos", follow_redirects=False)
+            self.assertEqual(response.headers["location"], prefix + "/login")
+            response = self.client.post(prefix + "/login", data={"password": "test-password-123"}, follow_redirects=False)
+            self.assertEqual(response.headers["location"], prefix + "/")
+            self.assertIn("Path=/SafeFork/", response.headers["set-cookie"])
+            token = next(iter(response.cookies.values()))
+            csrf = main.csrf_for(token)
+            repo = self.repo()
+            self.reviewed(repo)
+            for path in ("/", "/repos", f"/repos/{repo}", "/settings", "/github/connect", "/login", "/partials/repos", "/partials/overview"):
+                response = self.client.get(prefix + path)
+                self.assertEqual(response.status_code, 200, path)
+                parser = Links()
+                parser.feed(response.text)
+                for url in parser.urls:
+                    if url.startswith("/"):
+                        self.assertTrue(url.startswith(prefix + "/"), (path, url))
+                self.assertNotIn('href="/static/', response.text)
+            for asset in ("app.css", "app.js", "icons.svg", "favicon.svg"):
+                self.assertEqual(self.client.get(prefix + "/static/" + asset).status_code, 200)
+            self.assertEqual(self.client.post(prefix + "/settings", data={"interval_minutes": "60"}).status_code, 403)
+            response = self.client.post(prefix + "/settings", data={"csrf": csrf, "interval_minutes": "60"}, follow_redirects=False)
+            self.assertTrue(response.headers["location"].startswith(prefix + "/settings?"))
+            revision = main._repo_list_context()["revision"]
+            self.assertEqual(self.client.get(prefix + "/partials/repos?v=" + revision).status_code, 204)
+            response = self.client.post(prefix + "/logout", data={"csrf": csrf}, follow_redirects=False)
+            self.assertEqual(response.headers["location"], prefix + "/login")
+            self.assertIn("Path=/SafeFork/", response.headers["set-cookie"])
+            self.assertEqual(self.client.get(prefix + "/partials/repos").status_code, 401)
+
+    def test_subpath_auth_callback_and_forwarded_prefix_header(self):
+        self.login()
+        response = self.client.get("/repos", headers={"x-forwarded-prefix": "//attacker.invalid"})
+        self.assertNotIn("attacker.invalid", response.text)
+        with patch.object(main.app, "root_path", "/SafeFork"), patch.object(main, "exchange_manifest") as exchange:
+            response = self.client.get("/api/github/callback?code=invalid&state=wrong", follow_redirects=False)
+            self.assertEqual(response.headers["location"], "/SafeFork/login")
+            exchange.assert_not_called()
+
+    def test_empty_state_explains_connection_is_not_registration(self):
+        self.login()
+        self.db.set_setting("github_installation_id", "123")
+        for path in ("/", "/repos", "/partials/overview", "/partials/repos"):
+            response = self.client.get(path)
+            self.assertIn("尚未登记仓库", response.text)
+            self.assertIn("GitHub Actions", response.text)
+            self.assertNotIn("连接 GitHub 后会自动开始检查", response.text)
 
 
 if __name__ == "__main__":

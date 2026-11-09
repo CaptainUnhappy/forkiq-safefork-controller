@@ -390,6 +390,14 @@ test('the stored revision is sent back so an unchanged tick can be skipped', asy
   assert.equal(current.fetches[1].url, '/partials/repos?filter=&v=rev-1');
 });
 
+test('background refresh preserves the server-rendered deployment prefix', async () => {
+  const current = page();
+  current.region.dataset.refreshUrl = '/SafeFork/partials/repos?filter=paused';
+  await current.tickAsync();
+  assert.equal(current.fetches[0].url, '/SafeFork/partials/repos?filter=paused&v=rev-1');
+  assert.equal(current.reloads, 0);
+});
+
 test('identical fragment bytes do not rewrite the region', async () => {
   const current = page();
   await current.tickAsync();

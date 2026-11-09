@@ -38,7 +38,7 @@ def check(image, memory_mib=128, report=None):
                            "--cpus=1", "--pids-limit=64",
                            "-p", "127.0.0.1::8792", "-v", volume + ":/var/lib/forkiq",
                            "--mount", f"type=bind,source={Path(__file__).resolve().parents[1] / 'tests'},target=/opt/controller-tests,readonly",
-                           "-e", "FORKIQ_PUBLIC_URL=https://fixture.example.invalid", image)
+                           "-e", "FORKIQ_PUBLIC_URL=https://fixture.example.invalid/SafeFork", image)
         address = docker("port", container, "8792/tcp").splitlines()[0]
         origin = "http://" + address
         wait_healthy(origin)
@@ -50,7 +50,7 @@ def check(image, memory_mib=128, report=None):
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
         def request(path, data=None):
             encoded = urllib.parse.urlencode(data).encode() if data is not None else None
-            with client.open(origin + path, data=encoded, timeout=5) as response:
+            with client.open(origin + "/SafeFork" + path, data=encoded, timeout=5) as response:
                 return response.geturl(), response.read().decode()
         _, page = request("/setup")
         assert "设置管理员密码" in page
@@ -58,7 +58,12 @@ def check(image, memory_mib=128, report=None):
         request("/setup", {"password": fixture_password, "password2": fixture_password})
         _, page = request("/login", {"password": fixture_password})
         assert "概览" in page
-        print("PASS: cold start and login", flush=True)
+        assert 'data-refresh-url="/SafeFork/partials/overview"' in page
+        for asset in ("app.css", "app.js", "icons.svg", "favicon.svg"):
+            request("/static/" + asset)
+        _, page = request("/partials/repos")
+        assert "尚未登记仓库" in page
+        print("PASS: subpath cold start, login, static assets and status polling", flush=True)
         # Run actual Git fetch/archive/push tests alongside the live web worker.
         docker("exec", container, "mkdir", "-p", "/var/lib/forkiq/smoke-tmp")
         docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
