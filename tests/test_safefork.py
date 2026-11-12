@@ -85,9 +85,9 @@ class PolicyTests(unittest.TestCase):
         memory.push.assert_called_once()
 
     def test_git_network_classification_does_not_retry_access_or_certificate_errors(self):
-        for error in ("fatal: unable to access: Failed to connect to github.com", "gnutls_handshake() failed: The TLS connection was non-properly terminated.", "The requested URL returned error: 502"):
+        for error in ("fatal: unable to access: Failed to connect to github.com after 1403 ms", "gnutls_handshake() failed: The TLS connection was non-properly terminated.", "The requested URL returned error: 502", "unknown read error"):
             self.assertTrue(transient_read_error(error))
-        for error in ("SSL certificate problem: unable to get local issuer certificate", "Authentication failed", "The requested URL returned error: 403", "The requested URL returned error: 429", "Repository not found", "unknown error"):
+        for error in ("SSL certificate problem: unable to get local issuer certificate", "Authentication failed", "The requested URL returned error: 403", "The requested URL returned error: 429", "CONNECT tunnel failed, response 403", "Repository not found", "No space left on device", "cannot allocate memory", "fetch-pack died of signal 9"):
             self.assertFalse(transient_read_error(error))
 
     def test_git_stderr_classification_is_read_only_and_never_exposes_payload(self):

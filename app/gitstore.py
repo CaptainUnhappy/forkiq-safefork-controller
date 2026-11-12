@@ -19,19 +19,23 @@ class SyncBlocked(RuntimeError):
 
 
 class TransientGitRead(SyncBlocked):
-    """A classified network failure during ls-remote, never during a push."""
+    """A retryable ls-remote failure, never a request to repeat a push."""
 
 
 def transient_read_error(stderr):
     value = stderr.lower()
-    if any(marker in value for marker in ("certificate", "authentication", "permission denied", "not found", "401", "403", "429")):
+    permanent = ("certificate", "authentication", "permission denied", "not found", "access denied",
+                 "no space left", "disk quota", "read-only file system", "cannot allocate memory",
+                 "out of memory", "resource temporarily unavailable", "cannot create thread",
+                 "too many open files", "died of signal", "not a git repository", "bad config",
+                 "unknown option", "dubious ownership", "transport 'https' not allowed")
+    if any(marker in value for marker in permanent):
         return False
-    return (any(marker in value for marker in (
-        "could not resolve host", "could not resolve proxy", "failed to connect",
-        "connection timed out", "operation timed out", "connection reset", "connection was reset",
-        "recv failure", "send failure", "empty reply from server",
-        "tls connection was non-properly terminated", "failed to receive handshake"))
-        or bool(re.search(r"returned error: (500|502|503|504)\b|http/2 stream .*not closed cleanly", value)))
+    if re.search(r"(?:returned error:|response(?: code)?[: ]+|http/[12](?:\.\d+)? )\s*(401|403|404|410|429)\b", value):
+        return False
+    # Unknown read failures may also be transient. Bounded retries still require
+    # a complete valid snapshot and all identity/history checks before any write.
+    return True
 
 
 @contextmanager
@@ -152,8 +156,8 @@ class GitStore:
                 raise SyncBlocked(message) from None
             if code not in allowed:
                 errors.seek(0)
-                if operation == "ls-remote" and side and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
-                    raise TransientGitRead("Git 只读引用检查遇到暂时网络故障。")
+                if code > 0 and operation == "ls-remote" and side and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
+                    raise TransientGitRead("Git 只读引用检查未完成，正在有限重试。")
                 raise SyncBlocked("Git 操作失败（" + operation + "），请检查权限、引用与磁盘；不会强推。")
             output.seek(0)
             data = output.read(16 * 1024 * 1024 + 1)
