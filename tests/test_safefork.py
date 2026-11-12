@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from app.gitstore import GitStore, SyncBlocked, process_lock
+from app.gitstore import GitStore, SyncBlocked, TransientGitRead, transient_read_error, process_lock
 from app.push_guard import matches
 from app.safefork import make_plan, synchronize, validate_config, validate_identity, valid_ref, repo_name
 
@@ -62,6 +62,46 @@ class MemoryStore:
 
 
 class PolicyTests(unittest.TestCase):
+    def test_remote_ref_read_retries_only_classified_transient_errors(self):
+        store = GitStore("unused", "source/repo", "target/repo")
+        store.run = Mock(side_effect=[TransientGitRead("network"), (0, B + "\t" + MAIN + "\n")])
+        with patch("app.gitstore.time.sleep") as sleep:
+            self.assertEqual(store.refs("source"), {MAIN: B})
+            sleep.assert_called_once_with(1)
+        self.assertEqual(store.run.call_count, 2)
+        for error in (SyncBlocked("permission"), SyncBlocked("certificate")):
+            store.run = Mock(side_effect=error)
+            with self.assertRaises(SyncBlocked):store.refs("target")
+            self.assertEqual(store.run.call_count, 1)
+
+    def test_transient_ref_retries_are_bounded_and_push_is_not_retried(self):
+        store = GitStore("unused", "source/repo", "target/repo")
+        store.run = Mock(side_effect=TransientGitRead("network"))
+        with patch("app.gitstore.time.sleep"), self.assertRaisesRegex(SyncBlocked, "3 次"):
+            store.refs("target")
+        self.assertEqual(store.run.call_count, 3)
+        memory = MemoryStore();memory.push = Mock(side_effect=TransientGitRead("network"))
+        with self.assertRaises(SyncBlocked):synchronize(config(), memory, lambda: None, dry_run=False)
+        memory.push.assert_called_once()
+
+    def test_git_network_classification_does_not_retry_access_or_certificate_errors(self):
+        for error in ("fatal: unable to access: Failed to connect to github.com", "gnutls_handshake() failed: The TLS connection was non-properly terminated.", "The requested URL returned error: 502"):
+            self.assertTrue(transient_read_error(error))
+        for error in ("SSL certificate problem: unable to get local issuer certificate", "Authentication failed", "The requested URL returned error: 403", "The requested URL returned error: 429", "Repository not found", "unknown error"):
+            self.assertFalse(transient_read_error(error))
+
+    def test_git_stderr_classification_is_read_only_and_never_exposes_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = GitStore(root, "source/repo", "target/repo");store.path = Path(root)
+            def process(*args, **kwargs):
+                kwargs["stderr"].write(b"fatal: TLS connection was non-properly terminated; fixture-secret")
+                return Mock(wait=Mock(return_value=128))
+            with patch("app.gitstore.subprocess.Popen", side_effect=process):
+                for operation,kind in (("ls-remote", TransientGitRead), ("push", SyncBlocked)):
+                    with self.assertRaises(kind) as caught:store.run(operation, "https://github.com/source/repo.git", side="source")
+                    self.assertNotIn("fixture-secret", str(caught.exception))
+                    if operation == "push":self.assertNotIsInstance(caught.exception, TransientGitRead)
+
     def test_dry_run_never_pushes(self):
         store = MemoryStore()
         plan = synchronize(config(), store, lambda: None)

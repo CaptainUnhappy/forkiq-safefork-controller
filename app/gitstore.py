@@ -2,18 +2,36 @@
 import base64
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 
 class SyncBlocked(RuntimeError):
     """Only credential-free, actionable messages cross this interface."""
+
+
+class TransientGitRead(SyncBlocked):
+    """A classified network failure during ls-remote, never during a push."""
+
+
+def transient_read_error(stderr):
+    value = stderr.lower()
+    if any(marker in value for marker in ("certificate", "authentication", "permission denied", "not found", "401", "403", "429")):
+        return False
+    return (any(marker in value for marker in (
+        "could not resolve host", "could not resolve proxy", "failed to connect",
+        "connection timed out", "operation timed out", "connection reset", "connection was reset",
+        "recv failure", "send failure", "empty reply from server",
+        "tls connection was non-properly terminated", "failed to receive handshake"))
+        or bool(re.search(r"returned error: (500|502|503|504)\b|http/2 stream .*not closed cleanly", value)))
 
 
 @contextmanager
@@ -105,15 +123,16 @@ class GitStore:
             env["GIT_ALLOW_PROTOCOL"] = "file"
             command += ["-c", "protocol.file.allow=always"]
         command += list(args)
+        operation = args[1] if args[0].startswith("--git-dir=") else args[0]
         # Output never includes stderr, command arguments or credentials in errors.
-        with tempfile.TemporaryFile() as output:
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             proc = subprocess.Popen(command, cwd=self.path, env=env,
                                     stdin=subprocess.DEVNULL, stdout=output,
-                                    stderr=subprocess.DEVNULL, start_new_session=True)
+                                    stderr=errors, start_new_session=True)
             try:
                 # Initial full-history downloads may be much larger than later
                 # incremental checks. Never extend or retry a remote write.
-                timeout = 1800 if args[0] == "fetch" and side else 600
+                timeout = 60 if operation == "ls-remote" else (1800 if args[0] == "fetch" and side else 600)
                 code = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 if os.name == "nt":
@@ -125,12 +144,16 @@ class GitStore:
                     except ProcessLookupError:
                         pass
                 proc.wait()
+                if operation == "ls-remote" and side:
+                    raise TransientGitRead("Git 只读引用检查超时，未重试任何推送。") from None
                 message = ("Git 只读拉取超时，未推送；请检查网络与仓库容量后重新预览。"
                            if args[0] == "fetch" and side else
                            "Git 操作超时；若已推送，须核对远端结果后再恢复。")
                 raise SyncBlocked(message) from None
             if code not in allowed:
-                operation = args[1] if args[0].startswith("--git-dir=") else args[0]
+                errors.seek(0)
+                if operation == "ls-remote" and side and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
+                    raise TransientGitRead("Git 只读引用检查遇到暂时网络故障。")
                 raise SyncBlocked("Git 操作失败（" + operation + "），请检查权限、引用与磁盘；不会强推。")
             output.seek(0)
             data = output.read(16 * 1024 * 1024 + 1)
@@ -139,8 +162,15 @@ class GitStore:
             return code, data.decode("utf-8", errors="strict")
 
     def refs(self, side):
-        _, text = self.run("ls-remote", "--refs", self.url(side),
-                           "refs/heads/*", "refs/tags/*", side=side)
+        for attempt in range(3):
+            try:
+                _, text = self.run("ls-remote", "--refs", self.url(side),
+                                   "refs/heads/*", "refs/tags/*", side=side)
+                break
+            except TransientGitRead:
+                if attempt == 2:
+                    raise SyncBlocked("Git 只读引用检查在 3 次尝试后仍不可用，已停写；请检查网络后重新预览。") from None
+                time.sleep(2 ** attempt)
         result = {}
         for line in text.splitlines():
             sha, ref = line.split("\t", 1)
