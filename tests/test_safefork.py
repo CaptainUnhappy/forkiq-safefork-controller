@@ -49,6 +49,8 @@ class MemoryStore:
         return self.state[side].copy()
     def fetch(self, side, snapshot):
         pass
+    def seed_archive(self, config):
+        pass
     def archive_plan(self, config, expected):
         return {"path": "repositories/22.git", "before": self.archived.copy(), "local_only": [], "saved": False}
     def preserve(self, config, expected, archive):
@@ -459,11 +461,32 @@ class RealGitTests(unittest.TestCase):
                 synchronize(config(), store, lambda: None, dry_run=False)
             self.assertEqual(store.archive_refs(config())["refs/tags/v1"], self.a)
 
+    def test_seed_is_self_contained_and_incremental_fetch_preserves_archive(self):
+        with self.store() as store:
+            synchronize(config(), store, lambda: None, dry_run=False)
+            archive = store.archive_path(config())
+        b = self.commit("second")
+        with self.store() as store:
+            store.seed_archive(config())
+            self.assertEqual(store.run("rev-parse", MAIN)[1].strip(), self.a)
+            self.assertFalse((store.path / "objects/info/alternates").exists())
+            hidden = archive.with_suffix(".hidden")
+            archive.rename(hidden)
+            try:
+                store.run("fsck", "--full", "--no-dangling")
+                store.fetch("source", store.refs("source"))
+                self.assertTrue(store.is_ancestor(self.a, b))
+            finally:
+                hidden.rename(archive)
+            self.assertEqual(store.archive_refs(config()), {MAIN: self.a})
+
     def test_archive_identity_mismatch_and_unowned_directory_fail_closed(self):
         with self.store() as store:
             synchronize(config(), store, lambda: None, dry_run=False)
             with self.assertRaisesRegex(SyncBlocked, "身份"):
                 store.archive_refs(config(source_id=99))
+            with self.assertRaisesRegex(SyncBlocked, "身份"):
+                store.seed_archive(config(source_id=99))
             with self.assertRaises(SyncBlocked):
                 store.archive_path(config(target_id="../escape"))
         other = self.root / "repositories/23.git"

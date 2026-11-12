@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app.db import DB, insert_repository
-from app.engine import register, run_cycle, source_client, verify_live
+from app.engine import Worker, register, run_cycle, source_client, verify_live
 from app.gitstore import SyncBlocked
 from test_safefork import A, B, MAIN, MemoryStore, config, metadata
 
@@ -84,6 +84,22 @@ class EngineTests(unittest.TestCase):
         row = self.row()
         self.assertEqual((row["enabled"], row["review_required"], row["status"]), (1, 0, "synced"))
         self.assertEqual(row["fork_sha"], B)
+
+    def test_manual_cycle_does_not_resync_unrequested_enabled_repo(self):
+        self.add()
+        self.cycle(only_requested=True)
+        self.client.get_repo.assert_not_called()
+        self.assertIsNone(self.row()["last_success_at"])
+        self.db.run("UPDATE repositories SET sync_requested=1")
+        self.cycle(only_requested=True)
+        self.assertEqual(self.row()["status"], "synced")
+        self.assertEqual(self.row()["sync_requested"], 0)
+
+    def test_requested_preview_still_runs_while_paused(self):
+        self.add(enabled=0, review=1, dry=1)
+        self.cycle(only_requested=True)
+        self.assertEqual((self.row()["enabled"], self.row()["review_required"]), (0, 0))
+        self.assertEqual(self.store.writes, [])
 
     def test_actions_enabled_or_in_flight_blocks_all_writes(self):
         for enabled, active in ((True, False), (False, True)):
@@ -205,6 +221,33 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(source.installation_token(), "fixture-source")
             with self.assertRaises(SyncBlocked):
                 source_client({**cfg, "source_secret": "../outside"}, self.client)
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_manual_request_does_not_delay_scheduled_cycle(self):
+        with tempfile.TemporaryDirectory() as root:
+            worker = Worker(root, str(Path(root) / "unused.pem"))
+            with closing(DB(Path(root) / "forkiq.db")) as db:
+                repo = insert_repository(db, owner="owner", name="project", full_name="owner/project",
+                                         upstream_full_name="upstream/project")
+                db.set_setting("check_interval", "60")
+            clock, calls = [0], []
+            def wait(seconds):
+                clock[0] += seconds
+                if clock[0] == 5:
+                    with closing(DB(Path(root) / "forkiq.db")) as db:
+                        db.run("UPDATE repositories SET dry_run_requested=1 WHERE id=?", (repo,))
+                if clock[0] >= 70:
+                    worker.stop_flag.set()
+            def cycle(db, client, **kwargs):
+                calls.append((clock[0], kwargs["only_requested"]))
+                db.run("UPDATE repositories SET dry_run_requested=0,sync_requested=0")
+            worker.wake = Mock(wait=wait)
+            with patch("app.engine.time.monotonic", side_effect=lambda: clock[0]), \
+                    patch("app.engine.client_from_settings", return_value=Mock()), \
+                    patch("app.engine.run_cycle", side_effect=cycle):
+                worker.run()
+            self.assertEqual(calls, [(0, False), (5, True), (60, False)])
 
 
 class MigrationTests(unittest.TestCase):

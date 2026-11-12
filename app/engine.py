@@ -82,13 +82,15 @@ def verify_live(config, source, target):
         raise SyncBlocked("目标仍有在途 Actions；等待全部结束后再预览。")
 
 
-def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False):
+def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_requested=False):
     root = Path(db.path).parent
     with process_lock(root / "writer.lock"):
         for original in db.all("SELECT * FROM repositories ORDER BY id"):
             if cancelled():
                 return
             row = dict(original)
+            if only_requested and not (row["dry_run_requested"] or row["sync_requested"]):
+                continue
             dry = bool(row["dry_run_requested"])
             if not dry and (not row["enabled"] or row["review_required"]):
                 continue
@@ -171,17 +173,19 @@ class Worker(threading.Thread):
             while not self.stop_flag.is_set():
                 self.last_tick = time.monotonic()
                 requested = db.one("SELECT id FROM repositories WHERE dry_run_requested=1 OR sync_requested=1 LIMIT 1")
-                if requested or time.monotonic() >= due:
+                scheduled = time.monotonic() >= due
+                if requested or scheduled:
                     client = client_from_settings(db)
                     self.busy_since = time.monotonic()
                     try:
                         if client:
-                            run_cycle(db, client, cancelled=self.stop_flag.is_set)
+                            run_cycle(db, client, cancelled=self.stop_flag.is_set, only_requested=not scheduled)
                     except Exception:
                         log_event(db, None, "error", "同步检查未完成；请检查 worker 锁和存储。")
                     finally:
                         self.busy_since = 0.0
-                    due = time.monotonic() + max(60, min(86400, int(db.get_setting("check_interval", "3600"))))
+                    if scheduled:
+                        due = time.monotonic() + max(60, min(86400, int(db.get_setting("check_interval", "3600"))))
                 self.wake.wait(5)
                 self.wake.clear()
         finally:

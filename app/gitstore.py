@@ -111,7 +111,10 @@ class GitStore:
                                     stdin=subprocess.DEVNULL, stdout=output,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
             try:
-                code = proc.wait(timeout=600)
+                # Initial full-history downloads may be much larger than later
+                # incremental checks. Never extend or retry a remote write.
+                timeout = 1800 if args[0] == "fetch" and side else 600
+                code = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 if os.name == "nt":
                     subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -122,7 +125,10 @@ class GitStore:
                     except ProcessLookupError:
                         pass
                 proc.wait()
-                raise SyncBlocked("Git 操作超时；若已推送，须核对远端结果后再恢复。") from None
+                message = ("Git 只读拉取超时，未推送；请检查网络与仓库容量后重新预览。"
+                           if args[0] == "fetch" and side else
+                           "Git 操作超时；若已推送，须核对远端结果后再恢复。")
+                raise SyncBlocked(message) from None
             if code not in allowed:
                 operation = args[1] if args[0].startswith("--git-dir=") else args[0]
                 raise SyncBlocked("Git 操作失败（" + operation + "），请检查权限、引用与磁盘；不会强推。")
@@ -222,6 +228,17 @@ class GitStore:
                 raise SyncBlocked("持久仓库引用不完整或格式错误。")
             refs[ref] = sha
         return refs
+
+    def seed_archive(self, config):
+        """Reuse verified immutable objects without changing the saved archive."""
+        if not self.archive_refs(config):
+            return
+        seed = self.path / "seeded.git"
+        self.run("clone", "--local", "--bare", "--no-hardlinks",
+                 str(self.archive_path(config)), str(seed), local=True)
+        if (seed / "objects/info/alternates").exists() or (seed / "shallow").exists():
+            raise SyncBlocked("临时仓库必须具有独立完整历史。")
+        self.path = seed
 
     def archive_plan(self, config, expected):
         """Read-only archive validation; objects are fetched only into the scratch repo."""
