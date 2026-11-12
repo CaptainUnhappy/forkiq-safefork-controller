@@ -97,10 +97,13 @@ class PolicyTests(unittest.TestCase):
                 kwargs["stderr"].write(b"fatal: TLS connection was non-properly terminated; fixture-secret")
                 return Mock(wait=Mock(return_value=128))
             with patch("app.gitstore.subprocess.Popen", side_effect=process):
-                for operation,kind in (("ls-remote", TransientGitRead), ("push", SyncBlocked)):
+                for operation,kind in (("ls-remote", TransientGitRead), ("fetch", TransientGitRead), ("push", SyncBlocked)):
                     with self.assertRaises(kind) as caught:store.run(operation, "https://github.com/source/repo.git", side="source")
                     self.assertNotIn("fixture-secret", str(caught.exception))
                     if operation == "push":self.assertNotIsInstance(caught.exception, TransientGitRead)
+                with self.assertRaises(SyncBlocked) as caught:store.run("fetch", "local.git", local=True)
+                self.assertNotIsInstance(caught.exception, TransientGitRead)
+        with self.assertRaises(SyncBlocked):store.read_remote("push", side="target")
 
     def test_dry_run_never_pushes(self):
         store = MemoryStore()
@@ -375,6 +378,27 @@ class RealGitTests(unittest.TestCase):
             self.commit("second")
             with self.assertRaisesRegex(SyncBlocked, "引用变化"):
                 store.fetch("source", snapshot)
+
+    def test_remote_fetch_retry_preserves_snapshot_and_never_writes_target(self):
+        for change in (False, True):
+            with self.store() as store:
+                snapshot = store.refs("source");target = store.refs("target")
+                original = store.run;attempts = []
+                def flaky(*args, **kwargs):
+                    if args[0] == "fetch" and kwargs.get("side") == "source":
+                        attempts.append(True)
+                        if len(attempts) == 1:
+                            if change:self.commit("source changed during retry")
+                            raise TransientGitRead("read interrupted")
+                    return original(*args, **kwargs)
+                store.run = flaky
+                with patch("app.gitstore.time.sleep"):
+                    if change:
+                        with self.assertRaisesRegex(SyncBlocked, "引用变化"):store.fetch("source", snapshot)
+                    else:store.fetch("source", snapshot)
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(store.refs("target"), target)
+                self.assertFalse(store.archive_path(config()).exists())
 
     def test_pre_push_guard_blocks_remote_rewind_even_if_push_would_fast_forward(self):
         b = self.commit("second")

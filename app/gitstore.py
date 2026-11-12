@@ -19,7 +19,7 @@ class SyncBlocked(RuntimeError):
 
 
 class TransientGitRead(SyncBlocked):
-    """A retryable ls-remote failure, never a request to repeat a push."""
+    """A retryable remote read into scratch storage, never a persistent write."""
 
 
 def transient_read_error(stderr):
@@ -28,7 +28,8 @@ def transient_read_error(stderr):
                  "no space left", "disk quota", "read-only file system", "cannot allocate memory",
                  "out of memory", "resource temporarily unavailable", "cannot create thread",
                  "too many open files", "died of signal", "not a git repository", "bad config",
-                 "unknown option", "dubious ownership", "transport 'https' not allowed")
+                 "unknown option", "dubious ownership", "transport 'https' not allowed",
+                 "non-fast-forward", "would clobber existing tag")
     if any(marker in value for marker in permanent):
         return False
     if re.search(r"(?:returned error:|response(?: code)?[: ]+|http/[12](?:\.\d+)? )\s*(401|403|404|410|429)\b", value):
@@ -156,25 +157,31 @@ class GitStore:
                 raise SyncBlocked(message) from None
             if code not in allowed:
                 errors.seek(0)
-                if code > 0 and operation == "ls-remote" and side and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
-                    raise TransientGitRead("Git 只读引用检查未完成，正在有限重试。")
-                raise SyncBlocked("Git 操作失败（" + operation + "），请检查权限、引用与磁盘；不会强推。")
+                if code > 0 and operation in ("ls-remote", "fetch") and side and not local and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
+                    raise TransientGitRead("Git 远端读取未完成，正在有限重试。")
+                stage = {"source": "来源", "target": "目标"}.get(side, "本地")
+                raise SyncBlocked("Git 操作失败（" + stage + " " + operation + "，退出码 " + str(code)
+                                  + "），请检查权限、引用与磁盘；不会强推。")
             output.seek(0)
             data = output.read(16 * 1024 * 1024 + 1)
             if len(data) > 16 * 1024 * 1024:
                 raise SyncBlocked("Git 返回数据超出安全上限，停止处理不完整结果。")
             return code, data.decode("utf-8", errors="strict")
 
-    def refs(self, side):
+    def read_remote(self, *args, side):
+        if args[0] not in ("ls-remote", "fetch"):
+            raise SyncBlocked("只读重试不能用于持久保存或推送。")
         for attempt in range(3):
             try:
-                _, text = self.run("ls-remote", "--refs", self.url(side),
-                                   "refs/heads/*", "refs/tags/*", side=side)
-                break
+                return self.run(*args, side=side)
             except TransientGitRead:
                 if attempt == 2:
-                    raise SyncBlocked("Git 只读引用检查在 3 次尝试后仍不可用，已停写；请检查网络后重新预览。") from None
+                    raise SyncBlocked("Git 远端读取（" + args[0] + "）在 3 次尝试后仍不可用，已停写；请检查网络后重新预览。") from None
                 time.sleep(2 ** attempt)
+
+    def refs(self, side):
+        _, text = self.read_remote("ls-remote", "--refs", self.url(side),
+                                  "refs/heads/*", "refs/tags/*", side=side)
         result = {}
         for line in text.splitlines():
             sha, ref = line.split("\t", 1)
@@ -188,8 +195,8 @@ class GitStore:
         self.check_space()
         if not snapshot:
             return
-        self.run("fetch", "--no-tags", "--no-recurse-submodules", self.url(side),
-                 f"refs/heads/*:refs/{side}/heads/*", f"refs/tags/*:refs/{side}/tags/*", side=side)
+        self.read_remote("fetch", "--no-tags", "--no-recurse-submodules", self.url(side),
+                         f"refs/heads/*:refs/{side}/heads/*", f"refs/tags/*:refs/{side}/tags/*", side=side)
         _, text = self.run("for-each-ref", "--format=%(objectname) %(refname)", f"refs/{side}/")
         actual = {}
         for line in text.splitlines():
