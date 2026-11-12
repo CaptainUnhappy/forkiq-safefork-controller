@@ -1,5 +1,7 @@
 import unittest
-from unittest.mock import Mock
+import ssl
+import urllib.error
+from unittest.mock import Mock, patch
 from app.github import GitHub, AuthError, RateLimited, NoRedirect
 
 
@@ -61,6 +63,63 @@ class MetadataTests(unittest.TestCase):
         client._request.assert_called_once()
         args = client._request.call_args.args
         self.assertEqual(args[:2], ("POST", "https://api.github.com/app/installations/456/access_tokens"))
+
+
+class ReadTransportTests(unittest.TestCase):
+    def setUp(self):
+        self.client = GitHub(token="fixture-only")
+        self.response = Mock(status=200, headers={})
+        self.response.read.return_value = b'{"id": 12}'
+        self.context = Mock()
+        self.context.__enter__ = Mock(return_value=self.response)
+        self.context.__exit__ = Mock(return_value=False)
+        self.opener = Mock()
+        self.build = patch('app.github.urllib.request.build_opener', return_value=self.opener).start()
+        self.sleep = patch('app.github.time.sleep').start()
+        self.addCleanup(patch.stopall)
+
+    def request(self, method='GET'):
+        return self.client._request(method, 'https://api.github.com/repos/a/b',
+                                    {'Authorization': 'Bearer fixture-only'})
+
+    def test_read_recovers_from_transient_connection_failure(self):
+        self.opener.open.side_effect = [urllib.error.URLError('temporary'), self.context]
+        self.assertEqual(self.request()[:2], (200, {'id': 12}))
+        self.assertEqual(self.opener.open.call_count, 2)
+        requests = [call.args[0] for call in self.opener.open.call_args_list]
+        self.assertIsNot(requests[0], requests[1])
+
+    def test_read_recovers_from_transient_gateway_error(self):
+        self.opener.open.side_effect = [urllib.error.HTTPError('https://api.github.com', 503, '', {}, None), self.context]
+        self.assertEqual(self.request()[0], 200)
+        self.assertEqual(self.opener.open.call_count, 2)
+
+    def test_read_retry_is_bounded_and_does_not_disclose_error(self):
+        self.opener.open.side_effect = urllib.error.URLError('fixture-secret')
+        with self.assertRaises(RuntimeError) as raised:
+            self.request()
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertNotIn('fixture-secret', str(raised.exception))
+
+    def test_permissions_rate_limits_and_redirects_are_not_retried(self):
+        for code in (301, 401, 403, 404, 429):
+            with self.subTest(code=code):
+                self.opener.reset_mock()
+                self.opener.open.side_effect = urllib.error.HTTPError('https://api.github.com', code, '', {}, None)
+                self.assertEqual(self.request()[0], code)
+                self.opener.open.assert_called_once()
+
+    def test_certificate_validation_failure_is_not_retried(self):
+        self.opener.open.side_effect = urllib.error.URLError(ssl.SSLCertVerificationError('invalid certificate'))
+        with self.assertRaises(RuntimeError):
+            self.request()
+        self.opener.open.assert_called_once()
+
+    def test_credential_post_is_not_retried(self):
+        self.opener.open.side_effect = urllib.error.URLError('temporary')
+        with self.assertRaises(RuntimeError):
+            self.request('POST')
+        self.opener.open.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Read-only GitHub metadata plus explicit App credential bootstrap."""
 import json
+import http.client
 import os
 import ssl
 import time
@@ -32,22 +33,31 @@ class GitHub:
 
     def _request(self, method, url, headers, body=None, timeout=20):
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        req.add_header("Accept", "application/vnd.github+json")
-        req.add_header("X-GitHub-Api-Version", "2022-11-28")
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-        try:
-            with opener.open(req, timeout=timeout) as response:
-                raw = response.read(16 * 1024 * 1024 + 1)
-                if len(raw) > 16 * 1024 * 1024:
-                    raise RuntimeError("GitHub 返回数据超过安全上限。")
-                return response.status, json.loads(raw) if raw else None, dict(response.headers)
-        except urllib.error.HTTPError as error:
-            return error.code, {}, dict(error.headers)
-        except (urllib.error.URLError, TimeoutError):
-            raise RuntimeError("无法连接 GitHub，请检查网络。") from None
+        attempts = 4 if method == "GET" else 1
+        for attempt in range(attempts):
+            # Proxy handlers can mutate Request objects; each retry starts fresh.
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("X-GitHub-Api-Version", "2022-11-28")
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+            try:
+                with opener.open(req, timeout=timeout) as response:
+                    raw = response.read(16 * 1024 * 1024 + 1)
+                    if len(raw) > 16 * 1024 * 1024:
+                        raise RuntimeError("GitHub 返回数据超过安全上限。")
+                    return response.status, json.loads(raw) if raw else None, dict(response.headers)
+            except urllib.error.HTTPError as error:
+                status, response_headers = error.code, dict(error.headers)
+                error.close()
+                if status not in (500, 502, 503, 504) or attempt + 1 == attempts:
+                    return status, {}, response_headers
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+                reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                if isinstance(reason, ssl.SSLCertVerificationError) or attempt + 1 == attempts:
+                    raise RuntimeError("无法连接 GitHub，请检查网络。") from None
+            time.sleep(2 ** attempt)
 
     def app_jwt(self):
         now = int(time.time())
