@@ -183,6 +183,7 @@ class Worker(threading.Thread):
                     except Exception:
                         log_event(db, None, "error", "同步检查未完成；请检查 worker 锁和存储。")
                     finally:
+                        self.last_tick = time.monotonic()
                         self.busy_since = 0.0
                     if scheduled:
                         due = time.monotonic() + max(60, min(86400, int(db.get_setting("check_interval", "3600"))))

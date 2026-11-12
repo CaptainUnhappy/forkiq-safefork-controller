@@ -224,6 +224,22 @@ class EngineTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_completed_long_cycle_has_a_fresh_idle_heartbeat(self):
+        with tempfile.TemporaryDirectory() as root:
+            worker = Worker(root, str(Path(root) / "unused.pem"))
+            clock = [1]
+            def cycle(*args, **kwargs):
+                clock[0] += 120
+            def wait(seconds):
+                self.assertEqual(worker.busy_since, 0)
+                self.assertEqual(worker.last_tick, clock[0])
+                worker.stop_flag.set()
+            worker.wake = Mock(wait=wait)
+            with patch("app.engine.time.monotonic", side_effect=lambda: clock[0]), \
+                    patch("app.engine.client_from_settings", return_value=Mock()), \
+                    patch("app.engine.run_cycle", side_effect=cycle):
+                worker.run()
+
     def test_manual_request_does_not_delay_scheduled_cycle(self):
         with tempfile.TemporaryDirectory() as root:
             worker = Worker(root, str(Path(root) / "unused.pem"))
