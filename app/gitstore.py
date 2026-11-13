@@ -110,7 +110,7 @@ class GitStore:
                        GIT_CONFIG_VALUE_0="Authorization: Basic " + auth)
         return env
 
-    def run(self, *args, side=None, allowed=(0,), hooks=None, local=False):
+    def run(self, *args, side=None, allowed=(0,), hooks=None, local=False, input_text=None):
         if local and side is not None:
             raise SyncBlocked("本地保存不能附带远端凭据。")
         settings = ("credential.helper=", "core.hooksPath=" + str(hooks or self.path / "no-hooks"),
@@ -130,9 +130,12 @@ class GitStore:
         command += list(args)
         operation = args[1] if args[0].startswith("--git-dir=") else args[0]
         # Output never includes stderr, command arguments or credentials in errors.
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors, tempfile.TemporaryFile() as incoming:
+            if input_text is not None:
+                incoming.write(input_text.encode("utf-8"))
+                incoming.seek(0)
             proc = subprocess.Popen(command, cwd=self.path, env=env,
-                                    stdin=subprocess.DEVNULL, stdout=output,
+                                    stdin=incoming if input_text is not None else subprocess.DEVNULL, stdout=output,
                                     stderr=errors, start_new_session=True)
             try:
                 # Initial full-history downloads may be much larger than later
@@ -309,7 +312,8 @@ class GitStore:
         path = self.archive_path(config)
         if self.archive_refs(config) != archive["before"]:
             raise SyncBlocked("持久仓库在写入前变化，未推送 GitHub。")
-        if not path.exists():
+        fresh = not path.exists()
+        if fresh:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             path.mkdir(mode=0o700)
             with (path / "safefork-identity.json").open("x", encoding="utf-8") as handle:
@@ -320,7 +324,21 @@ class GitStore:
             primary = config.get("branch_map", {}).get(config["primary"], config["primary"])
             self.run("--git-dir=" + str(path), "symbolic-ref", "HEAD", "refs/heads/" + primary, local=True)
         changes = {ref: sha for ref, sha in expected.items() if archive["before"].get(ref) != sha}
-        if changes:
+        if changes and fresh:
+            # Objects in this trusted scratch store were already checked by fetch/fsck.
+            # Copy immutable objects instead of running pack-objects + index-pack together
+            # on a small host. No hardlinks/alternates, hooks, remotes, or scratch refs.
+            objects = self.path / "objects"
+            for entry in objects.rglob("*"):
+                if self._linked(entry):
+                    raise SyncBlocked("临时对象库包含链接，不能持久保存。")
+            size = sum(p.stat().st_size for p in objects.rglob("*") if p.is_file())
+            if shutil.disk_usage(self.root).free < size + 1024 ** 3:
+                raise SyncBlocked("完整副本所需空间不足，未推送 GitHub。")
+            shutil.copytree(objects, path / "objects", dirs_exist_ok=True)
+            script = "start\n" + "".join(f"create {ref} {sha}\n" for ref, sha in sorted(changes.items())) + "prepare\ncommit\n"
+            self.run("--git-dir=" + str(path), "update-ref", "--stdin", local=True, input_text=script)
+        elif changes:
             self.run("--git-dir=" + str(path), "fetch", "--atomic", "--no-tags", "--no-recurse-submodules",
                      self.path.as_uri(), *[sha + ":" + ref for ref, sha in sorted(changes.items())], local=True)
         wanted = {**archive["before"], **expected}
@@ -329,14 +347,33 @@ class GitStore:
         self.check_space()
         return {**archive, "saved": True, "ref_count": len(wanted)}
 
-    def push(self, updates, expected):
+    def prune_archive(self, config, deletes, expected):
+        from .safefork import valid_ref, valid_sha
+        if not config.get("prune_deleted_branches") or any(
+                not ref.startswith("refs/heads/") or not valid_ref(ref) or not valid_sha(sha)
+                or ref == "refs/heads/" + config["primary"] for ref, sha in deletes.items()):
+            raise SyncBlocked("持久分支清理范围无效。")
+        if self.archive_refs(config) != expected:
+            raise SyncBlocked("持久仓库在清理前变化，已停写。")
+        script = "start\n" + "".join(f"delete {ref} {sha}\n" for ref, sha in sorted(deletes.items())) + "prepare\ncommit\n"
+        self.run("--git-dir=" + str(self.archive_path(config)), "update-ref", "--stdin", local=True, input_text=script)
+        if self.archive_refs(config) != {k: v for k, v in expected.items() if k not in deletes}:
+            raise SyncBlocked("持久分支清理结果未确认。")
+
+    def push(self, updates, expected, deletes=None):
         """Ordinary atomic push plus a trusted hook pinning advertised old OIDs."""
         self.check_space()
+        from .safefork import valid_ref, valid_sha
+        deletes = deletes or {}
+        if set(updates) & set(deletes) or any(not ref.startswith("refs/heads/") or not valid_ref(ref)
+                or not valid_sha(sha) or expected.get(ref) != sha for ref, sha in deletes.items()):
+            raise SyncBlocked("删除分支的精确快照无效。")
         hooks = self.path / "trusted-hooks"
         hooks.mkdir()
         guard = hooks / "expected.json"
+        writes = {**updates, **{ref: "0" * 40 for ref in deletes}}
         guard.write_text(json.dumps({ref: [expected.get(ref, "0" * 40), sha]
-                                    for ref, sha in updates.items()}), encoding="utf-8")
+                                    for ref, sha in writes.items()}), encoding="utf-8")
         # This is our own reviewed hook, never a hook fetched from upstream.
         script = Path(__file__).with_name("push_guard.py").resolve()
         command = " ".join(shlex.quote(str(p).replace("\\", "/"))
@@ -346,4 +383,5 @@ class GitStore:
         hook.chmod(0o700)
         self.run("push", "--atomic", "--porcelain", "--no-follow-tags", "--recurse-submodules=no",
                  "--", self.url("target"), *[sha + ":" + ref for ref, sha in sorted(updates.items())],
+                 *[":" + ref for ref in sorted(deletes)],
                  side="target", hooks=hooks)

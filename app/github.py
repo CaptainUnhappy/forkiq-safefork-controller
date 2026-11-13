@@ -37,7 +37,8 @@ class GitHub:
         for attempt in range(attempts):
             # Proxy handlers can mutate Request objects; each retry starts fresh.
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
-            req.add_header("Accept", "application/vnd.github+json")
+            if not req.has_header("Accept"):
+                req.add_header("Accept", "application/vnd.github+json")
             req.add_header("X-GitHub-Api-Version", "2022-11-28")
             if data is not None:
                 req.add_header("Content-Type", "application/json")
@@ -81,8 +82,9 @@ class GitHub:
     def _api(self, method, path, body=None):
         if method != "GET" or body is not None or not path.startswith("/"):
             raise RuntimeError("SafeFork 元数据客户端只允许 GET；引用写入须经过安全计划。")
+        token = self.installation_token()
         status, payload, headers = self._request(method, API + path,
-                                                {"Authorization": f"Bearer {self.installation_token()}"})
+                                                {"Authorization": f"Bearer {token}"} if token else {})
         if status == 429 or (status == 403 and headers.get("X-RateLimit-Remaining") == "0"):
             raise RateLimited("GitHub 限流，已停写。")
         if status in (401, 403, 404):

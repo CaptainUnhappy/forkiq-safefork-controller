@@ -44,6 +44,9 @@ body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.65 "Ave
 h1, h2, h3, p { margin: 0; }
 h1 { font-size: 20px; line-height: 1.4; font-weight: 600; letter-spacing: -.02em; }
 h2 { margin-bottom: 16px; font-size: 16px; line-height: 1.5; font-weight: 600; }
+.creation-panel { max-width: 56rem; overflow-wrap: anywhere; }
+.creation-panel .stacked-form { margin-top: 20px; }
+.creation-panel .stacked-form > button { justify-self: start; }
 a { color: var(--primary); text-decoration: none; text-underline-offset: 3px; }
 a:hover { text-decoration: underline; }
 button, input, select, textarea { font: inherit; }

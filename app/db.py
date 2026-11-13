@@ -61,6 +61,26 @@ CREATE TABLE IF NOT EXISTS sessions(
   created_at REAL NOT NULL,
   expires_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sync_baselines(repo_id INTEGER PRIMARY KEY, refs_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS oauth_states(
+  state_hash TEXT PRIMARY KEY, session_hash TEXT NOT NULL, verifier TEXT NOT NULL, expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS creation_jobs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  target TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  account_id INTEGER NOT NULL,
+  primary_branch TEXT NOT NULL,
+  target_id INTEGER,
+  repo_id INTEGER,
+  phase TEXT NOT NULL DEFAULT 'preflight',
+  status TEXT NOT NULL DEFAULT 'queued',
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_id,account_id)
+);
 CREATE TABLE IF NOT EXISTS repository_backups(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id INTEGER,

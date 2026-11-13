@@ -130,23 +130,30 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                 source_token = (source.installation_token if config["mode"] == "standalone-private" else lambda: "")
                 with store_type(root, config["source"], config["target"], source_token,
                                 client.installation_token) as store:
-                    plan = synchronize(config, store, guard, dry_run=dry, before_write=before_write)
+                    baseline = db.one("SELECT refs_json FROM sync_baselines WHERE repo_id=?", (row["id"],))
+                    plan = synchronize(config, store, guard, dry_run=dry, before_write=before_write,
+                                       managed_refs=json.loads(baseline["refs_json"]) if baseline else None)
                 primary = "refs/heads/" + config["primary"]
                 dest = "refs/heads/" + config["branch_map"].get(config["primary"], config["primary"])
                 target_refs = plan["target"] if dry else {**plan["target"], **plan["updates"]}
+                if not dry:
+                    target_refs = {k: v for k, v in target_refs.items() if k not in plan.get("deletes", {})}
                 enabled = int(not dry and bool(row["enabled"]))
                 stamp = utcnow()
                 plan["checked_at"] = stamp
-                db.run("UPDATE repositories SET plan_json=?,fork_sha=?,upstream_sha=?,last_check_at=?,"
+                with db.transaction() as conn:
+                    changed = conn.execute("UPDATE repositories SET plan_json=?,fork_sha=?,upstream_sha=?,last_check_at=?,"
                        "last_success_at=?,last_error=NULL,review_required=0,enabled=?,status=?,updated_at=? "
                        "WHERE id=? AND control_epoch=? AND config_json=?",
                        (json.dumps(plan, sort_keys=True), target_refs.get(dest), plan["source"].get(primary), stamp,
                         row["last_success_at"] if dry else stamp, enabled, "synced" if enabled else "paused", stamp,
                         row["id"], row["control_epoch"], row["config_json"]))
-                if dry or plan["updates"]:
+                    if changed.rowcount == 1 and not dry and config.get("prune_deleted_branches"):
+                        conn.execute("INSERT OR REPLACE INTO sync_baselines VALUES(?,?)", (row["id"], json.dumps(plan["source"], sort_keys=True)))
+                if dry or plan["updates"] or plan.get("deletes"):
                     log_event(db, row["id"], "check" if dry else "synced",
                               f"{'只读预览' if dry else '同步已核对'}：{len(plan['updates'])} 个安全更新，"
-                              f"保留 {len(plan['target_only'])} 个目标独有引用。")
+                              f"清理 {len(plan.get('deletes', {}))} 个过期分支，保留 {len(plan['target_only'])} 个目标独有引用。")
             except Exception as error:
                 message = str(error) if isinstance(error, SyncBlocked) else "检查或连接失败；已停写，请核对凭据、网络与仓库状态后预览。"
                 db.run("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',"
@@ -173,13 +180,18 @@ class Worker(threading.Thread):
             while not self.stop_flag.is_set():
                 self.last_tick = time.monotonic()
                 requested = db.one("SELECT id FROM repositories WHERE dry_run_requested=1 OR sync_requested=1 LIMIT 1")
+                creating = db.one("SELECT id FROM creation_jobs WHERE status IN ('queued','working') LIMIT 1")
                 scheduled = time.monotonic() >= due
-                if requested or scheduled:
+                if requested or scheduled or creating:
                     client = client_from_settings(db)
                     self.busy_since = time.monotonic()
                     try:
                         if client:
-                            run_cycle(db, client, cancelled=self.stop_flag.is_set, only_requested=not scheduled)
+                            if creating:
+                                from .provision import run_jobs
+                                run_jobs(db, client, cancelled=self.stop_flag.is_set)
+                            if requested or scheduled:
+                                run_cycle(db, client, cancelled=self.stop_flag.is_set, only_requested=not scheduled)
                     except Exception:
                         log_event(db, None, "error", "同步检查未完成；请检查 worker 锁和存储。")
                     finally:

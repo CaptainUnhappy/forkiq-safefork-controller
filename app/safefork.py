@@ -38,6 +38,10 @@ def validate_config(config):
         raise SyncBlocked("来源与目标 ID 不能相同。")
     if config.get("mode") not in ("public-fork", "standalone-private"):
         raise SyncBlocked("不支持的存储模式。")
+    if type(config.get("prune_deleted_branches", False)) is not bool:
+        raise SyncBlocked("分支清理策略无效。")
+    if config.get("prune_deleted_branches") and (config["mode"] != "public-fork" or config.get("branch_map")):
+        raise SyncBlocked("自动分支清理仅适用于显式启用的公开同名同步。")
     if not valid_ref("refs/heads/" + config.get("primary", "")):
         raise SyncBlocked("源主分支无效。")
     mapping = config.get("branch_map", {})
@@ -74,6 +78,8 @@ def validate_identity(config, source, target):
         raise SyncBlocked("源默认分支变化，须人工审查。")
     if target.get("archived") is not False:
         raise SyncBlocked("目标已归档或状态未知。")
+    if config.get("prune_deleted_branches") and target.get("default_branch") != config["primary"]:
+        raise SyncBlocked("目标默认分支变化，须人工审查。")
     if private:
         if target.get("fork") is not False or target.get("parent"):
             raise SyncBlocked("私有目标必须是独立私有仓库，不能是原生 Fork。")
@@ -84,11 +90,11 @@ def validate_identity(config, source, target):
             raise SyncBlocked("公开目标的 Fork 来源变化；不会选择替代上游。")
 
 
-def make_plan(config, source, target, store):
+def make_plan(config, source, target, store, managed_refs=None):
     validate_config(config)
     if "refs/heads/" + config["primary"] not in source:
         raise SyncBlocked("源主分支不存在，停止同步。")
-    if "refs/heads/sync-control" in source:
+    if "refs/heads/sync-control" in source and not config.get("prune_deleted_branches"):
         raise SyncBlocked("上游占用 sync-control，不能覆盖控制分支。")
     mapping, preserved = config.get("branch_map", {}), config.get("preserved_tags", {})
     for tag, pair in preserved.items():
@@ -133,17 +139,29 @@ def make_plan(config, source, target, store):
                         raise SyncBlocked("异常删除：" + dest + "；需要单独审查，不自动放行。")
             updates[dest] = sha
         decisions.append({"source": ref, "target": dest, "old": old, "new": sha, "action": decision})
-    # Include preserved target-only refs when checking Git's directory/file namespace.
+    deletes = {}
+    if config.get("prune_deleted_branches"):
+        if managed_refs is not None and not isinstance(managed_refs, dict):
+            raise SyncBlocked("成功同步基线无效，不能清理分支。")
+        for ref, sha in (managed_refs or {}).items():
+            if not valid_ref(ref) or not valid_sha(sha):
+                raise SyncBlocked("成功同步基线无效，不能清理分支。")
+            if ref.startswith("refs/heads/") and ref not in source:
+                if target.get(ref) != sha:
+                    raise SyncBlocked("待清理分支已被其他操作改变：" + ref)
+                deletes[ref] = sha
+                decisions.append({"source": ref, "target": ref, "old": sha, "new": None, "action": "delete"})
+    # Conservatively stop on namespace replacement, even if one side is being removed.
     names = set(target) | destinations
     for name in names:
         parts = name.split("/")
         if any("/".join(parts[:index]) in names for index in range(2, len(parts))):
             raise SyncBlocked("目标引用存在目录/文件名称冲突。")
-    return {"updates": updates, "decisions": decisions,
-            "target_only": sorted(set(target) - destinations), "source": source, "target": target}
+    return {"updates": updates, "deletes": deletes, "decisions": decisions,
+            "target_only": sorted(set(target) - destinations - set(deletes)), "source": source, "target": target}
 
 
-def synchronize(config, store, verify_identity, *, dry_run=True, before_write=lambda: None):
+def synchronize(config, store, verify_identity, *, dry_run=True, before_write=lambda: None, managed_refs=None):
     """verify_identity must enforce live IDs, visibility and disabled/quiescent Actions."""
     validate_config(config)
     verify_identity()
@@ -151,9 +169,12 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     source, target = store.refs("source"), store.refs("target")
     store.fetch("source", source)
     store.fetch("target", target)
-    plan = make_plan(config, source, target, store)
+    plan = make_plan(config, source, target, store, managed_refs)
     expected = {**target, **plan["updates"]}
     plan["archive"] = store.archive_plan(config, expected)
+    for ref, sha in plan["deletes"].items():
+        if plan["archive"]["before"].get(ref) != sha:
+            raise SyncBlocked("服务器待清理分支与成功基线不一致：" + ref)
     verify_identity()
     if store.refs("source") != source or store.refs("target") != target:
         raise SyncBlocked("规划期间引用变化，未写入；请重新检查。")
@@ -165,10 +186,18 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     if store.refs("source") != source or store.refs("target") != target:
         raise SyncBlocked("写入前引用变化，未写入。")
     before_write()
-    if plan["updates"]:
+    if plan["deletes"]:
+        store.push(plan["updates"], target, deletes=plan["deletes"])
+    elif plan["updates"]:
         store.push(plan["updates"], target)
+    for ref in plan["deletes"]:
+        expected.pop(ref)
     for attempt in range(3):
         if store.refs("target") == expected:
+            if plan["deletes"]:
+                before_write()
+                store.prune_archive(config, plan["deletes"], {**plan["archive"]["before"], **expected})
+                plan["archive"]["ref_count"] -= len(plan["deletes"])
             return plan
         if attempt < 2:
             time.sleep(1)

@@ -1,0 +1,26 @@
+{% extends "shell.html" %}
+{% set active_page = "repos" %}
+{% block title %}ForkIQ · 新建 SafeFork{% endblock %}
+{% block page_title %}新建 SafeFork{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ base_path }}/repos">返回仓库列表</a>
+<section class="card creation-panel">
+  <h2>粘贴公开上游，自动创建并同步</h2>
+  <p>完整保存 Git 分支与标签到服务器，并同步到你的 GitHub。目标 Actions 自动关闭，默认分支与上游一致。</p>
+  {% if error %}<p class="notice warn" role="alert">{{ error }}</p>{% endif %}
+  {% if oauth.connected %}
+  <form method="post" action="{{ base_path }}/create" class="stacked-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="create-source">公开上游仓库链接</label><input id="create-source" name="source" type="text" value="{{ source or '' }}" placeholder="https://github.com/owner/repository" required aria-describedby="create-target create-policy">
+    <p id="create-target">目标：<output id="create-target-name" data-owner="{{ oauth.login }}">{{ oauth.login }}/原名-SafeFork</output></p>
+    <p id="create-policy" class="field-help">创建后自动启用定时检查。清理上游已删除的受管分支；回退、分叉或标签改写时停写。不会覆盖已有同名仓库。</p>
+    <button class="primary">创建并自动同步</button>
+  </form>
+  <p class="field-help">当前授权：{{ oauth.login }} · <a href="{{ base_path }}/oauth">管理授权</a></p>
+  {% else %}
+  <p>首次使用需要 GitHub 网页授权，以创建仓库并关闭目标 Actions。</p>
+  <a class="primary link" href="{{ base_path }}/oauth">连接 GitHub 创建授权</a>
+  {% endif %}
+</section>
+<p class="field-help">本入口仅支持公开仓库。范围为 Git 可达历史，不含 LFS 文件实体、Issues 或 Release 附件。空间不足或预检失败时会停下并显示原因，已创建的仓库不会自动删除。</p>
+{% endblock %}

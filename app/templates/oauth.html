@@ -1,0 +1,38 @@
+{% extends "shell.html" %}
+{% set active_page = "settings" %}
+{% block title %}ForkIQ · GitHub 创建授权{% endblock %}
+{% block page_title %}GitHub 创建授权{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ base_path }}/create">返回新建 SafeFork</a>
+{% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
+<section class="card creation-panel">
+  <h2>{{ '已授权：' ~ oauth.login if oauth.connected else '授权创建公开仓库' }}</h2>
+  <p>用于在你的账号创建公开 SafeFork 并关闭其 Actions。已有仓库的日常同步继续使用专用 GitHub App。</p>
+  <p>GitHub 要求此流程使用 <code>repo</code> 权限，其范围包含你有权访问的公开和私有仓库。本入口只处理你明确提交的公开来源。</p>
+  {% if oauth.configured %}
+  <form method="post" action="{{ base_path }}/oauth/authorize"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">{{ '重新授权 GitHub' if oauth.connected else '前往 GitHub 授权' }}</button></form>
+  {% else %}<p class="notice">首次使用，请先完成下方 OAuth 应用配置；以后新建仓库无需复制 Token。</p>{% endif %}
+  {% if oauth.connected %}
+  <form method="post" action="{{ base_path }}/oauth/disconnect" class="actions"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">清除创建授权</button></form>
+  <p class="field-help">如需在 GitHub 撤销授权，请前往 <a href="https://github.com/settings/applications" target="_blank" rel="noopener noreferrer">已授权应用</a>。</p>
+  {% endif %}
+</section>
+<section class="card creation-panel">
+  <details {% if not oauth.configured %}open{% endif %}>
+    <summary>{{ '更换 OAuth 应用配置' if oauth.configured else '首次配置 OAuth 应用' }}</summary>
+    <ol>
+      <li>打开 <a href="https://github.com/settings/applications/new" target="_blank" rel="noopener noreferrer">GitHub OAuth 应用注册页</a>，应用名可填写 <strong>SafeFork Create</strong>。</li>
+      <li>Homepage URL 填写 <code>{{ homepage }}</code>。</li>
+      <li>Authorization callback URL 填写 <code>{{ callback }}</code>。</li>
+      <li>注册后生成 Client Secret，在下方保存。不要把它发送到聊天中。</li>
+    </ol>
+    <form method="post" action="{{ base_path }}/oauth/configure" class="stacked-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label for="oauth-client-id">Client ID</label><input id="oauth-client-id" name="client_id" required autocomplete="off">
+      <label for="oauth-client-secret">Client Secret</label><input id="oauth-client-secret" type="password" name="client_secret" required autocomplete="new-password">
+      <p class="field-help">密钥仅保存于服务器受限文件，不会回显。更换配置会清除已有创建授权。</p>
+      <button class="primary">保存 OAuth 配置</button>
+    </form>
+  </details>
+</section>
+{% endblock %}

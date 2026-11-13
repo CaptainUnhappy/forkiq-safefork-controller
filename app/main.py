@@ -20,6 +20,8 @@ from .github import exchange_manifest, write_pem
 from .gitstore import SyncBlocked
 from .errors import error_guidance
 from .versions import annotate, short_time
+from .oauth import OAuthStore
+from . import oauth, provision
 
 STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
 PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", str(STATE_DIR / "app.pem"))
@@ -122,6 +124,141 @@ def check_csrf(request, token):
 
 def form_guard(request, csrf):
     return require_login(request) or check_csrf(request, csrf)
+
+
+@app.middleware("http")
+async def private_responses(request, call_next):
+    response = await call_next(request)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if "/static/" not in request.url.path:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def oauth_store():
+    return OAuthStore(Path(db.path).parent)
+
+
+def oauth_context():
+    try:
+        return oauth_store().status()
+    except SyncBlocked:
+        return {"configured": False, "connected": False, "login": ""}
+
+
+@app.get("/oauth", response_class=HTMLResponse)
+def oauth_page(request: Request):
+    denied = require_login(request)
+    if denied:
+        return denied
+    return render(request, "oauth.html", oauth=oauth_context(), callback=public_url() + oauth.CALLBACK,
+                  homepage=public_url(), notice=request.query_params.get("notice", ""))
+
+
+@app.post("/oauth/configure")
+def oauth_configure(request: Request, csrf: str = Form(""), client_id: str = Form(""), client_secret: str = Form("")):
+    denied = form_guard(request, csrf)
+    if denied:
+        return denied
+    try:
+        oauth_store().configure(client_id.strip(), client_secret.strip())
+        db.run("DELETE FROM oauth_states")
+    except SyncBlocked as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    return redirect(request, "/oauth?notice=配置已保存，请继续 GitHub 授权")
+
+
+@app.post("/oauth/authorize")
+def oauth_authorize(request: Request, csrf: str = Form("")):
+    denied = form_guard(request, csrf)
+    if denied:
+        return denied
+    try:
+        url = oauth.begin(db, oauth_store(), current_session(request)["token"], public_url())
+    except SyncBlocked as error:
+        return JSONResponse({"error": str(error)}, status_code=409)
+    return RedirectResponse(url, status_code=302)
+
+
+@app.get("/oauth/callback")
+def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    denied = require_login(request)
+    if denied:
+        return denied
+    try:
+        if error:
+            oauth.consume_state(db, state, current_session(request)["token"])
+            raise SyncBlocked("GitHub 授权未完成，可以重新发起。")
+        oauth.complete(db, oauth_store(), current_session(request)["token"], code, state, public_url(),
+                       app_client_from_settings(db), db.get_setting("github_installation_id"))
+    except Exception as failure:
+        message = str(failure) if isinstance(failure, SyncBlocked) else "授权连接未完成，请检查配置、账号与网络后重新授权。"
+        from urllib.parse import urlencode
+        return redirect(request, "/oauth?" + urlencode({"notice": message}))
+    return redirect(request, "/create")
+
+
+@app.post("/oauth/disconnect")
+def oauth_disconnect(request: Request, csrf: str = Form("")):
+    denied = form_guard(request, csrf)
+    if denied:
+        return denied
+    oauth_store().disconnect()
+    db.run("DELETE FROM oauth_states")
+    return redirect(request, "/oauth?notice=已清除本机创建授权，已有仓库同步继续使用专用 App")
+
+
+@app.get("/create", response_class=HTMLResponse)
+def create_page(request: Request):
+    return require_login(request) or render(request, "create.html", oauth=oauth_context(), error="")
+
+
+@app.post("/create")
+def create_submit(request: Request, csrf: str = Form(""), source: str = Form("")):
+    denied = form_guard(request, csrf)
+    if denied:
+        return denied
+    try:
+        job_id = provision.enqueue(db, source)
+    except Exception as failure:
+        message = str(failure) if isinstance(failure, SyncBlocked) else "无法验证公开来源或创建授权，请检查链接、账号和网络。"
+        return render(request, "create.html", oauth=oauth_context(), error=message, source=source)
+    worker.request_sync()
+    return redirect(request, f"/create/{job_id}")
+
+
+@app.get("/create/{job_id}", response_class=HTMLResponse)
+def creation_page(request: Request, job_id: int):
+    denied = require_login(request)
+    if denied:
+        return denied
+    job = db.one("SELECT * FROM creation_jobs WHERE id=?", (job_id,))
+    if not job:
+        return JSONResponse({"error": "创建任务不存在"}, status_code=404)
+    return render(request, "creation.html", job=job, phases=provision.PHASES)
+
+
+@app.get("/partials/creation/{job_id}", response_class=HTMLResponse)
+def creation_partial(request: Request, job_id: int):
+    if not current_session(request):
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    job = db.one("SELECT * FROM creation_jobs WHERE id=?", (job_id,))
+    if not job:
+        return Response(status_code=404)
+    return render(request, "partials/creation_status.html", job=job, phases=provision.PHASES)
+
+
+@app.post("/create/{job_id}/retry")
+def creation_retry(request: Request, job_id: int, csrf: str = Form("")):
+    denied = form_guard(request, csrf)
+    if denied:
+        return denied
+    try:
+        provision.retry(db, job_id)
+    except SyncBlocked as error:
+        return JSONResponse({"error": str(error)}, status_code=409)
+    worker.request_sync()
+    return redirect(request, f"/create/{job_id}")
 
 
 @app.on_event("startup")
@@ -294,7 +431,8 @@ def _repo_list_context(filter=""):
     rows = _rows(filter)
     connected = bool(db.get_setting("github_installation_id"))
     return {"repos": annotate(rows), "filter": filter, "revision": _revision(rows) + str(connected),
-            "auto_discover": False, "app_connected": connected}
+            "auto_discover": False, "app_connected": connected,
+            "creation_jobs": db.all("SELECT id,target,status FROM creation_jobs ORDER BY id DESC LIMIT 10")}
 
 
 def _overview_context():
@@ -427,7 +565,7 @@ def settings_page(request: Request):
     return require_login(request) or render(request, "settings.html",
         interval_minutes=f'{int(db.get_setting("check_interval", "3600")) / 60:g}',
         app_slug=db.get_setting("github_app_slug"), installation_id=db.get_setting("github_installation_id"),
-        auth_error="", notice=request.query_params.get("notice", ""))
+        oauth=oauth_context(), auth_error="", notice=request.query_params.get("notice", ""))
 
 
 @app.post("/settings")

@@ -10,6 +10,10 @@
   <div class="actions"><a class="secondary link" href="{{ base_path }}/github/connect">连接与检测</a>
   <form method="post" action="{{ base_path }}/settings/disconnect"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">断开并暂停所有同步</button></form></div>
 </section>
+<section class="card"><h2>GitHub 创建授权</h2>
+  <p>{{ '已授权：' ~ oauth.login if oauth.connected else '尚未授权' }}。用于一键创建公开 SafeFork；日常同步仍使用上方专用 App。</p>
+  <a class="secondary link" href="{{ base_path }}/oauth">{{ '管理创建授权' if oauth.connected else '配置并授权 GitHub' }}</a>
+</section>
 <section class="card" id="sync"><h2>检查间隔</h2>
   <form method="post" action="{{ base_path }}/settings" class="stacked-form"><input type="hidden" name="csrf" value="{{ csrf }}">
     <label for="interval">每轮完成后等待（分钟）</label><input id="interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="1" max="1440" step="any" required>
@@ -18,7 +22,7 @@
   <p class="field-help">默认 60 分钟，串行检查已确认启用的仓库。任务时长、网络、限流和停机会造成延迟；不承诺每小时必定成功。不自动发现或接管新仓库。</p>
 </section>
 <section class="card"><h2>历史保护</h2>
-  <p>已有分支只能快进；已有标签不可移动；上游删除引用不传播到备份。来源身份或可见性变化、分叉、空文件树、删除超过 100 个文件或 50% 时停写，需人工审查。</p>
+  <p>已有分支只能快进；已有标签不可移动。通过新建入口创建的公开库会清理上游已删除的受管分支；登记已有库沿用保留规则。来源身份或可见性变化、分叉、空文件树、删除超过 100 个文件或 50% 时停写。</p>
   <p>控制器不启用 Actions、不执行上游脚本、不提供合并或覆盖回滚。备份目标的 Actions 必须持续关闭，应用开发仓库的 CI 与它分离。</p>
 </section>
 <section class="card"><h2>账户安全</h2>

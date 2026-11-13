@@ -148,6 +148,13 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(refs=refs), self.assertRaises(SyncBlocked):
                 make_plan(config(), refs, {}, MemoryStore())
 
+    def test_server_created_policy_has_no_reserved_control_branch_and_validates_baseline(self):
+        cfg = config(prune_deleted_branches=True)
+        plan = make_plan(cfg, {MAIN: A, "refs/heads/sync-control": A}, {}, MemoryStore())
+        self.assertIn("refs/heads/sync-control", plan["updates"])
+        with self.assertRaisesRegex(SyncBlocked, "基线"):
+            make_plan(cfg, {MAIN: A}, {}, MemoryStore(), managed_refs=[MAIN])
+
     def test_immutable_tag_and_exact_exception(self):
         ref = "refs/tags/v1"
         source, target = {MAIN: A, ref: B}, {MAIN: A, ref: C}
@@ -583,6 +590,89 @@ class RealGitTests(unittest.TestCase):
             with self.assertRaisesRegex(SyncBlocked, "写入前变化"):
                 synchronize(config(), store, lambda: None, dry_run=False)
             store.push.assert_not_called()
+
+    def test_prune_managed_branch_both_copies_and_preserve_unknown_and_tags(self):
+        cfg = config(prune_deleted_branches=True)
+        old = "refs/heads/obsolete"
+        self.git(self.source, "branch", "obsolete")
+        self.git(self.source, "tag", "v1")
+        with self.store() as store:
+            baseline = synchronize(cfg, store, lambda: None, dry_run=False)["source"]
+        self.git(self.source, "update-ref", "-d", old)
+        self.git(self.source, "update-ref", "-d", "refs/tags/v1")
+        self.git(self.target, "update-ref", "refs/heads/manual", self.a)
+        b = self.commit("next")
+        with self.store() as store:
+            preview = synchronize(cfg, store, lambda: None, managed_refs=baseline)
+            self.assertEqual(preview["deletes"], {old: self.a})
+            self.assertIn(old, store.refs("target"))
+            self.assertIn(old, store.archive_refs(cfg))
+        with self.store() as store:
+            plan = synchronize(cfg, store, lambda: None, dry_run=False, managed_refs=baseline)
+            expected = {MAIN: b, "refs/heads/manual": self.a, "refs/tags/v1": self.a}
+            self.assertEqual(store.refs("target"), expected)
+            self.assertEqual(store.archive_refs(cfg), expected)
+            self.assertEqual(plan["archive"]["ref_count"], len(expected))
+
+    def test_prune_changed_branch_blocks_fast_forward_batch(self):
+        cfg = config(prune_deleted_branches=True)
+        old = "refs/heads/obsolete"
+        self.git(self.source, "branch", "obsolete")
+        with self.store() as store:
+            baseline = synchronize(cfg, store, lambda: None, dry_run=False)["source"]
+        self.git(self.source, "update-ref", "-d", old)
+        b = self.commit("new")
+        self.git(self.source, "push", str(self.target), "main:refs/heads/obsolete")
+        with self.store() as store:
+            before = store.refs("target")
+            with self.assertRaisesRegex(SyncBlocked, "待清理分支"):
+                synchronize(cfg, store, lambda: None, dry_run=False, managed_refs=baseline)
+            self.assertEqual(store.refs("target"), before)
+
+    def test_prune_concurrent_advertisement_change_rejects_entire_atomic_push(self):
+        old = "refs/heads/obsolete"
+        self.git(self.target, "update-ref", old, self.a)
+        b = self.commit("second")
+        with self.store() as store:
+            source, target = store.refs("source"), store.refs("target")
+            store.fetch("source", source); store.fetch("target", target)
+            self.git(self.source, "push", str(self.target), "main:refs/heads/obsolete")
+            with self.assertRaises(SyncBlocked):
+                store.push({MAIN: b}, target, deletes={old: self.a})
+            self.assertEqual(store.refs("target"), {MAIN: self.a, old: b})
+
+    def test_prune_failure_keeps_archive_and_no_baseline_never_deletes(self):
+        cfg = config(prune_deleted_branches=True)
+        old = "refs/heads/obsolete"
+        self.git(self.source, "branch", "obsolete")
+        with self.store() as store:
+            baseline = synchronize(cfg, store, lambda: None, dry_run=False)["source"]
+        self.git(self.source, "update-ref", "-d", old)
+        with self.store() as store:
+            plan = synchronize(cfg, store, lambda: None)
+            self.assertEqual(plan["deletes"], {})
+            store.push = Mock(side_effect=SyncBlocked("network"))
+            with self.assertRaises(SyncBlocked):
+                synchronize(cfg, store, lambda: None, dry_run=False, managed_refs=baseline)
+            self.assertIn(old, store.archive_refs(cfg))
+            self.assertIn(old, store.refs("target"))
+
+    def test_prune_does_not_bypass_rollback_or_moved_tag(self):
+        cfg = config(prune_deleted_branches=True)
+        b = self.commit("second")
+        self.git(self.source, "branch", "obsolete")
+        self.git(self.source, "tag", "v1")
+        with self.store() as store:
+            baseline = synchronize(cfg, store, lambda: None, dry_run=False)["source"]
+        self.git(self.source, "update-ref", "-d", "refs/heads/obsolete")
+        for ref in (MAIN, "refs/tags/v1"):
+            self.git(self.source, "update-ref", ref, self.a)
+            with self.store() as store:
+                before = store.refs("target")
+                with self.assertRaises(SyncBlocked):
+                    synchronize(cfg, store, lambda: None, dry_run=False, managed_refs=baseline)
+                self.assertEqual(store.refs("target"), before)
+            self.git(self.source, "update-ref", ref, b)
 
 
 if __name__ == "__main__":

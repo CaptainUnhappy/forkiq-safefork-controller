@@ -9,7 +9,9 @@ def matches(expected, lines):
         if len(fields) != 4:
             return False
         _, new, ref, old = fields
-        if expected.get(ref) != [old, new] or new == "0" * 40:
+        if expected.get(ref) != [old, new]:
+            return False
+        if new == "0" * 40 and (not ref.startswith("refs/heads/") or old == "0" * 40):
             return False
     return True
 

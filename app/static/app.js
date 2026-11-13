@@ -143,6 +143,18 @@
     });
   }
   bindForms(document);
+  const createSource = document.querySelector('#create-source');
+  const createTarget = document.querySelector('#create-target-name');
+  if (createSource && createTarget) {
+    const showTarget = () => {
+      const source = createSource.value.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
+      const match = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/([A-Za-z0-9_.-]{1,100})$/.exec(source);
+      const name = match ? match[1] + (match[1].endsWith('-SafeFork') ? '' : '-SafeFork') : '原名-SafeFork';
+      createTarget.textContent = createTarget.dataset.owner + '/' + name;
+    };
+    createSource.addEventListener('input', showTarget);
+    showTarget();
+  }
   // Background refresh replaces only the list region. A full reload re-fetched
   // the shell, CSS and JS every 30 seconds and made the panel feel sluggish, so
   // the server renders the same rows into a fragment that is swapped in place.

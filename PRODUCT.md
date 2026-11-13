@@ -18,7 +18,11 @@ paused until a read-only preview is confirmed. One safe write path handles all
 heads and raw tags using normal atomic push. Public sources use public native
 forks; authorized private sources use standalone private targets and separate
 read credentials. Target Actions remain disabled and quiescent.
-No discovery, merge, force, rollback, workflow keepalive, or Actions settings writes.
+Public web creation uses a separate OAuth initialization flow to create the named
+Fork, disable its Actions, preserve complete Git history and enable the scheduler.
+Newly created public targets prune only upstream-deleted branches pinned by a
+successful baseline; existing registrations keep their current retention policy.
+No discovery, merge, force, rollback, workflow keepalive, or Actions enablement.
 No real credentials or private repository contents belong in source or fixtures.
 
 ## Brand Commitments

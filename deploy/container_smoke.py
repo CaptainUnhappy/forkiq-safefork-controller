@@ -63,11 +63,17 @@ def check(image, memory_mib=128, report=None):
             request("/static/" + asset)
         _, page = request("/partials/repos")
         assert "尚未登记仓库" in page
+        _, page = request("/create")
+        assert "连接 GitHub 创建授权" in page
+        _, page = request("/oauth")
+        assert "https://fixture.example.invalid/SafeFork/oauth/callback" in page
         print("PASS: subpath cold start, login, static assets and status polling", flush=True)
         # Run actual Git fetch/archive/push tests alongside the live web worker.
         docker("exec", container, "mkdir", "-p", "/var/lib/forkiq/smoke-tmp")
         docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_safefork.py")
+        docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
+               container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_creation.py")
         peak = int(docker("exec", container, "python", "-c",
                           "from pathlib import Path; p=Path('/sys/fs/cgroup/memory.peak'); "
                           "p=p if p.exists() else Path('/sys/fs/cgroup/memory/memory.max_usage_in_bytes'); print(p.read_text())"))

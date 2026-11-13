@@ -100,9 +100,34 @@ class WebTests(unittest.TestCase):
         self.login()
         repo = self.repo()
         for path in (f"/repos/{repo}/pause", f"/repos/{repo}/preview", f"/repos/{repo}/resume",
-                     "/repos/add", "/settings", "/settings/password", "/settings/disconnect", "/github/detect", "/logout"):
+                     "/repos/add", "/settings", "/settings/password", "/settings/disconnect", "/github/detect", "/logout",
+                     "/create", "/create/1/retry", "/oauth/configure", "/oauth/authorize", "/oauth/disconnect"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path).status_code, 403)
+
+    def test_creation_pages_require_login_and_secrets_are_never_echoed(self):
+        for url in ("/create", "/oauth", "/create/1"):
+            self.assertEqual(self.client.get(url, follow_redirects=False).status_code, 302)
+        self.assertEqual(self.client.get("/partials/creation/1").status_code, 401)
+        csrf = self.login()
+        self.client.post("/oauth/configure", data={"csrf": csrf, "client_id": "test_client_id",
+                                                 "client_secret": "fixture-secret-" + "a"*30}, follow_redirects=False)
+        with patch.dict(os.environ, FORKIQ_PUBLIC_URL="https://example.test/SafeFork"):
+            page = self.client.get("/oauth")
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn("fixture-secret", page.text)
+        self.assertIn("https://example.test/SafeFork/oauth/callback", page.text)
+        self.assertEqual(page.headers["referrer-policy"], "no-referrer")
+        self.assertEqual(page.headers["cache-control"], "no-store")
+        self.assertIn("新建 SafeFork", self.client.get("/repos").text)
+
+    def test_creation_submit_queues_once_and_redirects_to_progress(self):
+        csrf = self.login()
+        with patch.object(main.provision, "enqueue", return_value=3) as enqueue:
+            response = self.client.post("/create", data={"csrf": csrf, "source": "upstream/project"}, follow_redirects=False)
+        self.assertEqual(response.headers["location"], "/create/3")
+        enqueue.assert_called_once_with(self.db, "upstream/project")
+        self.worker.request_sync.assert_called_once()
 
     def test_preview_pauses_and_queues_only_read(self):
         csrf = self.login()

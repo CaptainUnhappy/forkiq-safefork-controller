@@ -10,7 +10,7 @@
 {% if repo.last_error %}<p id="repo-error" class="notice warn" role="alert">{{ repo.last_error }}</p>{% endif %}
 <section class="card">
   <h2>安全同步</h2>
-  <p>所有分支仅创建或快进；已有标签和归档不改动。来源变化、冲突或目标 Actions 开启时停止，不能通过重试绕过。</p>
+  <p>分支更新仅创建或快进，已有标签不改写。{% if config and config.prune_deleted_branches %}上游已删除的受管分支会安全清理。{% else %}上游删除的引用继续保留。{% endif %}来源变化、冲突或目标 Actions 开启时停止。</p>
   <div class="actions">
     <form method="post" action="{{ base_path }}/repos/{{ repo.id }}/preview"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">只读预览（暂停写入）</button></form>
     {% if repo.enabled %}
@@ -29,7 +29,7 @@
     <dt>上游</dt><dd>{{ repo_link(config.source) }} · ID {{ config.source_id }}</dd>
     <dt>目标</dt><dd>{{ repo_link(config.target) }} · ID {{ config.target_id }}</dd>
     <dt>存储模式</dt><dd>{{ '公开 Fork' if config.mode == 'public-fork' else '经授权独立私有备份' }}</dd>
-    <dt>分支范围</dt><dd>所有 heads；主分支 {{ config.primary }}。sync-control 保留。</dd>
+    <dt>分支范围</dt><dd>所有 heads；主分支 {{ config.primary }}。{{ '自动清理上游已删除的受管分支；未知目标分支保留。' if config.prune_deleted_branches else '上游删除的分支继续保留。' }}</dd>
     <dt>显式映射</dt><dd>{% for source, target in config.branch_map.items() %}<div><code>{{ source }}</code> → <code>{{ target }}</code>；旧 {{ source }} 保留</div>{% else %}同名同步{% endfor %}</dd>
     <dt>最近检查</dt><dd>{{ timestamp(repo.last_check_at) }}</dd>
     <dt>最近同步核对</dt><dd>{{ timestamp(repo.last_success_at) }}</dd>
@@ -44,7 +44,7 @@
   {% if plan.archive %}<p>{{ '服务器副本已核对' if plan.archive.saved else '只读预览，尚未写入服务器副本' }}；另保留 {{ plan.archive.local_only|length }} 个服务器独有引用。</p>{% endif %}
   <div class="table-wrap" role="region" aria-label="同步引用计划" tabindex="0"><table>
     <thead><tr><th>来源 → 目标</th><th>决策</th><th>计划目标 SHA</th></tr></thead><tbody>
-    {% for item in plan.decisions %}<tr><td><code>{{ item.source }}</code><br><code>{{ item.target }}</code></td><td>{{ {'create':'创建','equal':'相同','fast-forward':'快进','preserved':'已审核保留原标签'}[item.action] }}</td><td><code>{{ item.old if item.action == 'preserved' else item.new }}</code>{% if item.action == 'preserved' %}<br>上游：<code>{{ item.new }}</code>{% endif %}</td></tr>{% endfor %}
+    {% for item in plan.decisions %}<tr><td><code>{{ item.source }}</code><br><code>{{ item.target }}</code></td><td>{{ {'create':'创建','equal':'相同','fast-forward':'快进','preserved':'已审核保留原标签','delete':'清理过期分支'}[item.action] }}</td><td><code>{{ item.old if item.action in ('preserved','delete') else item.new }}</code>{% if item.action == 'preserved' %}<br>上游：<code>{{ item.new }}</code>{% endif %}</td></tr>{% endfor %}
     </tbody></table></div>
   {% if plan.target_only %}<details><summary>保留的目标独有引用</summary><ul>{% for ref in plan.target_only %}<li><code>{{ ref }}</code></li>{% endfor %}</ul></details>{% endif %}
 </section>

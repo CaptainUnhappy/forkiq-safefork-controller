@@ -1,0 +1,12 @@
+{% extends "shell.html" %}
+{% set active_page = "repos" %}
+{% set auto_refresh = 5 %}
+{% set refresh_region = "creation-status" %}
+{% block title %}ForkIQ · 创建进度{% endblock %}
+{% block page_title %}创建 SafeFork{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ base_path }}/repos">返回仓库列表</a>
+<section class="card creation-panel" id="creation-status" data-refresh-url="{{ base_path }}/partials/creation/{{ job.id }}">
+{% include "partials/creation_status.html" %}
+</section>
+{% endblock %}

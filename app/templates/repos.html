@@ -8,7 +8,7 @@
 {% block page_title %}仓库管理{% endblock %}
 {% block header_actions %}{% endblock %}
 {% block content %}
-    <div class="page-intro"><p class="muted">仅追加和快进，保留已有历史与标签。目标仓库的 GitHub Actions 必须持续关闭。</p></div>
+    <div class="page-intro"><p class="muted">跟进上游更新，拦截历史回退与标签改写。目标仓库的 GitHub Actions 持续关闭。</p></div>
     {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
     <div class="filters">
         <a class="chip-link {% if not filter %}active{% endif %}" href="{{ base_path }}/repos">全部</a>
@@ -20,6 +20,7 @@
         <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="{{ base_path }}/repos?filter=paused">已暂停</a>
       </div>
     <div class="repo-toolbar">
+    <a class="primary link" href="{{ base_path }}/create">{{ icon('plus') }}新建 SafeFork</a>
     <details class="add-repo" id="register-repo" {% if add_error or (not repos and not filter) %}open{% endif %}>
       <summary>{{ icon('plus') }}登记已有 SafeFork</summary>
       <div class="add-repo-body">
@@ -44,6 +45,7 @@
     </details>
     <span class="toolbar-help">只同步显式登记且确认启用的仓库 · <a href="{{ base_path }}/settings#sync">检查间隔</a></span>
     </div>
+    {% if creation_jobs %}<details class="card"><summary>最近创建任务</summary><ul>{% for job in creation_jobs %}<li><a href="{{ base_path }}/create/{{ job.id }}">{{ job.target }}</a> · {{ {'queued':'等待执行','working':'正在执行','blocked':'需关注','complete':'创建完成'}[job.status] }}</li>{% endfor %}</ul></details>{% endif %}
     <section class="card">
       <div id="repo-table-region" data-refresh-url="{{ base_path }}/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>
     </section>
