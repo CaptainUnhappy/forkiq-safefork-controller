@@ -83,6 +83,7 @@ class GitStore:
         self.tokens = {"source": source_token, "target": target_token}
         self.temporary = None
         self.public_source = False
+        self.ref_readers = {}
 
     def __enter__(self):
         self.check_space()
@@ -208,6 +209,11 @@ class GitStore:
                 time.sleep(2 ** attempt)
 
     def refs(self, side):
+        if side in self.ref_readers:
+            try:
+                return self.ref_readers[side]()
+            except RemoteReadUnavailable:
+                pass  # Another official protocol, never mirror-provided authority.
         _, text = self.read_remote("ls-remote", "--refs", self.url(side),
                                   "refs/heads/*", "refs/tags/*", side=side)
         result = {}

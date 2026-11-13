@@ -6,12 +6,67 @@ import unittest
 import urllib.error
 from pathlib import Path
 from unittest.mock import Mock, patch
-from app.github import GitHub
+from app.github import GitHub, REFS_QUERY
 from app.gitstore import GitStore, SyncBlocked, RemoteReadUnavailable, MirrorUnavailable
 from test_safefork import A, B, MAIN
 
 
 class NetworkTests(unittest.TestCase):
+    @staticmethod
+    def page(nodes, total, more=False, cursor=None, **repo_changes):
+        repo = dict(databaseId=11,nameWithOwner="public/source",isPrivate=False,
+                    refs=dict(totalCount=total,nodes=[dict(name=n,target=dict(oid=s)) for n,s in nodes],
+                              pageInfo=dict(hasNextPage=more,endCursor=cursor)))
+        repo.update(repo_changes)
+        return (200,{"data":{"repository":repo}}, {})
+
+    def test_official_refs_page_completeness_and_raw_tag_object(self):
+        api=GitHub(token="fixture")
+        api._request=Mock(side_effect=[self.page([("main",A)],2,True,"cursor1"),
+                                      self.page([("other",B)],2), self.page([("v1",B)],1)])
+        self.assertEqual(api.refs("public/source",11,False),{MAIN:A,"refs/heads/other":B,"refs/tags/v1":B})
+        calls=api._request.call_args_list
+        self.assertEqual(calls[1].args[3]["variables"]["after"],"cursor1")
+        self.assertEqual(calls[2].args[3]["variables"]["prefix"],"refs/tags/")
+        for call in calls:
+            self.assertEqual(call.args[1],"https://api.github.com/graphql")
+            self.assertEqual(call.args[3]["query"],REFS_QUERY)
+
+    def test_official_refs_reject_partial_errors_identity_count_duplicate_and_cursor(self):
+        cases=[
+            [self.page([("main",A)],2)],
+            [self.page([("main",A)],1,databaseId=99)],
+            [self.page([("main",A)],1,isPrivate=True)],
+            [self.page([("main",A)],1,nameWithOwner="other/source")],
+            [(200,{"errors":[{"type":"FORBIDDEN"}],"data":{"repository":None}},{})],
+            [self.page([("main",A)],2,True,"cursor1"),self.page([("main",B)],2)],
+            [self.page([("main",A)],3,True,"cursor1"),self.page([("other",B)],3,True,"cursor1")],
+            [self.page([("main",A)],2,True,"cursor1"),self.page([("other",B)],3)]
+        ]
+        for pages in cases:
+            api=GitHub(token="fixture");api._request=Mock(side_effect=pages)
+            with self.assertRaises(SyncBlocked):api.refs("public/source",11,False)
+
+    def test_official_api_network_only_falls_back_to_official_git(self):
+        store=GitStore("unused","public/source","owner/target")
+        store.ref_readers={"source":Mock(side_effect=RemoteReadUnavailable("network"))}
+        store.read_remote=Mock(return_value=(0,A+"\t"+MAIN+"\n"))
+        self.assertEqual(store.refs("source"),{MAIN:A})
+        self.assertIn("https://github.com/public/source.git",store.read_remote.call_args.args)
+        store.read_remote.reset_mock()
+        store.ref_readers["source"].side_effect=SyncBlocked("identity changed")
+        with self.assertRaises(SyncBlocked):store.refs("source")
+        store.read_remote.assert_not_called()
+
+    def test_only_fixed_read_query_post_gets_network_retries(self):
+        for query, calls in ((REFS_QUERY,4),("mutation { noop }",1)):
+            opener=Mock();opener.open.side_effect=urllib.error.URLError(TimeoutError())
+            with patch("app.github.urllib.request.build_opener",return_value=opener),patch("app.github.time.sleep"),self.assertRaises(RuntimeError) as caught:
+                GitHub()._request("POST","https://api.github.com/graphql",{},dict(query=query))
+            self.assertEqual(opener.open.call_count,calls)
+            if calls==4:self.assertIsInstance(caught.exception,RemoteReadUnavailable)
+            else:self.assertNotIsInstance(caught.exception,RemoteReadUnavailable)
+
     def test_mirror_cannot_receive_tokens_or_run_writes_or_private_reads(self):
         with tempfile.TemporaryDirectory() as root:
             source, target = Mock(return_value="secret-source"), Mock(return_value="secret-target")

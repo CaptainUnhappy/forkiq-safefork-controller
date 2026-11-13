@@ -199,6 +199,8 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
                     conn.execute("UPDATE creation_jobs SET phase='sync_intent',updated_at=? WHERE id=?", (utcnow(), job["id"]))
                     conn.execute("UPDATE repositories SET review_required=1,enabled=0,status='needs_attention',last_error='首次保存或推送未确认，请核对后恢复。' WHERE id=?", (job["repo_id"],))
             with store_type(root, cfg["source"], cfg["target"], lambda: "", client.installation_token) as store:
+                store.ref_readers = {"source":lambda:client.refs(cfg["source"],cfg["source_id"],False),
+                                     "target":lambda:client.refs(cfg["target"],cfg["target_id"],False)}
                 plan = synchronize(cfg, store, guard, dry_run=False, before_write=before_write)
             stamp = utcnow()
             plan["checked_at"] = stamp

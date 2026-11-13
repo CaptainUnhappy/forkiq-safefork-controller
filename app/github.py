@@ -8,9 +8,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 import jwt
-from .gitstore import RemoteReadUnavailable
+from .gitstore import RemoteReadUnavailable, SyncBlocked
 
 API = "https://api.github.com"
+REFS_QUERY = """query SafeForkRefs($owner:String!, $name:String!, $prefix:String!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    databaseId nameWithOwner isPrivate
+    refs(refPrefix:$prefix, first:100, after:$after, orderBy:{field:ALPHABETICAL,direction:ASC}) {
+      totalCount nodes { name target { oid } } pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
 
 
 class AuthError(RuntimeError):
@@ -34,7 +42,10 @@ class GitHub:
 
     def _request(self, method, url, headers, body=None, timeout=20):
         data = json.dumps(body).encode() if body is not None else None
-        attempts = 4 if method == "GET" else 1
+        # Only this exact fixed GraphQL query is a retryable POST, never mutations.
+        read = method == "GET" or (method == "POST" and url == API + "/graphql"
+                                  and isinstance(body, dict) and body.get("query") == REFS_QUERY)
+        attempts = 4 if read else 1
         for attempt in range(attempts):
             # Proxy handlers can mutate Request objects; each retry starts fresh.
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -53,7 +64,7 @@ class GitHub:
             except urllib.error.HTTPError as error:
                 status, response_headers = error.code, dict(error.headers)
                 error.close()
-                if method == "GET" and status in (500, 502, 503, 504) and attempt + 1 == attempts:
+                if read and status in (500, 502, 503, 504) and attempt + 1 == attempts:
                     raise RemoteReadUnavailable("GitHub 只读接口暂不可用（HTTP " + str(status) + "）。") from None
                 if status not in (500, 502, 503, 504) or attempt + 1 == attempts:
                     return status, {}, response_headers
@@ -62,7 +73,7 @@ class GitHub:
                 if isinstance(reason, ssl.SSLCertVerificationError):
                     raise RuntimeError("GitHub 证书验证失败，已停止连接。") from None
                 if attempt + 1 == attempts:
-                    if method == "GET":
+                    if read:
                         raise RemoteReadUnavailable("GitHub 只读接口连接失败，本轮读取未完成。") from None
                     raise RuntimeError("无法连接 GitHub，请检查网络。") from None
             time.sleep(2 ** attempt)
@@ -103,6 +114,51 @@ class GitHub:
     def get_repo(self, full_name):
         from .safefork import repo_name
         return self._api("GET", f"/repos/{repo_name(full_name)}")
+
+    def refs(self, full_name, expected_id, private):
+        """Official complete refs, including annotated tag object IDs (not peeled commits)."""
+        from .safefork import repo_name, valid_ref, valid_sha
+        owner, name = repo_name(full_name).split("/")
+        result = {}
+        for prefix in ("refs/heads/", "refs/tags/"):
+            cursor, total, count, seen = None, None, 0, set()
+            for _ in range(100):
+                body = {"query": REFS_QUERY, "variables": dict(owner=owner, name=name, prefix=prefix, after=cursor)}
+                status, payload, headers = self._request("POST", API + "/graphql",
+                    {"Authorization": "Bearer " + self.installation_token()}, body)
+                if status == 429 or (status == 403 and headers.get("X-RateLimit-Remaining") == "0"):
+                    raise RateLimited("GitHub 限流，已停写。")
+                if status != 200 or not isinstance(payload, dict) or payload.get("errors"):
+                    raise SyncBlocked("GitHub 官方引用接口未返回完整结果，已停写。")
+                try:
+                    repo = payload["data"]["repository"]
+                    if (repo["databaseId"] != expected_id or repo["nameWithOwner"] != full_name
+                            or repo["isPrivate"] is not private):
+                        raise ValueError
+                    refs = repo["refs"]
+                    if type(refs["totalCount"]) is not int or not 0 <= refs["totalCount"] <= 10000:
+                        raise ValueError
+                    if total is None:total = refs["totalCount"]
+                    if refs["totalCount"] != total or not isinstance(refs["nodes"], list) or len(refs["nodes"]) > 100:
+                        raise ValueError
+                    for node in refs["nodes"]:
+                        ref, sha = prefix + node["name"], node["target"]["oid"]
+                        if not valid_ref(ref) or not valid_sha(sha) or ref in result:raise ValueError
+                        result[ref] = sha
+                        count += 1
+                    info = refs["pageInfo"]
+                    if type(info["hasNextPage"]) is not bool or count > total:raise ValueError
+                    if not info["hasNextPage"]:
+                        if count != total:raise ValueError
+                        break
+                    cursor = info["endCursor"]
+                    if not refs["nodes"] or not isinstance(cursor, str) or not cursor or cursor in seen:raise ValueError
+                    seen.add(cursor)
+                except (KeyError, TypeError, ValueError):
+                    raise SyncBlocked("GitHub 官方引用身份、分页或原始 SHA 不完整，已停写。") from None
+            else:
+                raise SyncBlocked("GitHub 官方引用超过完整读取上限，已停写。")
+        return result
 
     def actions_enabled(self, full_name):
         payload = self._api("GET", f"/repos/{full_name}/actions/permissions")

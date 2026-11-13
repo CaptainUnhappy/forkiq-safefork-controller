@@ -139,6 +139,9 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                 source_token = (source.installation_token if config["mode"] == "standalone-private" else lambda: "")
                 with store_type(root, config["source"], config["target"], source_token,
                                 client.installation_token) as store:
+                    store.ref_readers = {
+                        "source": lambda: source.refs(config["source"], config["source_id"], config["mode"] == "standalone-private"),
+                        "target": lambda: client.refs(config["target"], config["target_id"], config["mode"] == "standalone-private")}
                     baseline = db.one("SELECT refs_json FROM sync_baselines WHERE repo_id=?", (row["id"],))
                     plan = synchronize(config, store, guard, dry_run=dry, before_write=before_write,
                                        managed_refs=json.loads(baseline["refs_json"]) if baseline else None)
