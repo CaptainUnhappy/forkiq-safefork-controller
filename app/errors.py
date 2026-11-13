@@ -5,6 +5,9 @@ import re
 def error_guidance(message):
     """Explain known failures, including historical GitHub payloads, without guessing."""
     text = (message or "").lower()
+    if "等待自动重试" in text:
+        return {"summary": "本轮网络读取未完成，已安排自动重试。",
+                "action": "本轮尚未开始保存或推送，无需反复点击；可在仓库详情查看时间或暂停。"}
     if "object does not exist" in text:
         return {"summary": "GitHub 找不到要同步的提交，本次同步未完成。",
                 "action": "同步已暂停。核对仓库身份和完整历史，完成只读预览后再确认恢复；不会强推或自动重试写入。"}

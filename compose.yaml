@@ -6,6 +6,7 @@ services:
       - "127.0.0.1:8792:8792"
     environment:
       FORKIQ_PUBLIC_URL: "${FORKIQ_PUBLIC_URL:?set your own HTTPS origin}"
+      FORKIQ_PUBLIC_GIT_MIRROR: "${FORKIQ_PUBLIC_GIT_MIRROR:-}"
     volumes:
       - state:/var/lib/forkiq
     read_only: true

@@ -165,6 +165,7 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     """verify_identity must enforce live IDs, visibility and disabled/quiescent Actions."""
     validate_config(config)
     verify_identity()
+    store.public_source = config["mode"] == "public-fork"
     store.seed_archive(config)
     source, target = store.refs("source"), store.refs("target")
     store.fetch("source", source)

@@ -74,6 +74,9 @@ def check(image, memory_mib=128, report=None):
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_safefork.py")
         docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_creation.py")
+        for suite in ("test_engine.py", "test_network.py"):
+            docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
+                   container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", suite)
         peak = int(docker("exec", container, "python", "-c",
                           "from pathlib import Path; p=Path('/sys/fs/cgroup/memory.peak'); "
                           "p=p if p.exists() else Path('/sys/fs/cgroup/memory/memory.max_usage_in_bytes'); print(p.read_text())"))

@@ -63,6 +63,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual((response.status_code, response.headers["location"]), (302, "/setup"))
         self.assertEqual(self.client.get("/partials/repos").status_code, 401)
 
+    def test_retry_status_time_and_pause_cancellation_are_visible(self):
+        csrf = self.login()
+        repo = self.repo()
+        self.db.run("UPDATE repositories SET enabled=1,review_required=0,status='retrying',retry_count=2,next_retry_at=2000000000,last_error='等待自动重试' WHERE id=?", (repo,))
+        response = self.client.get(f"/repos/{repo}")
+        self.assertIn("第 2/5 次自动重试", response.text)
+        self.assertIn("datetime=", response.text)
+        self.assertIn("等待重试", self.client.get("/partials/repos?filter=waiting").text)
+        self.client.post(f"/repos/{repo}/pause", data={"csrf":csrf})
+        row = self.db.one("SELECT * FROM repositories WHERE id=?", (repo,))
+        self.assertEqual((row["enabled"], row["retry_count"], row["next_retry_at"]), (0, 0, 0))
+
     def test_setup_minimum_and_one_time(self):
         response = self.client.post("/setup", data={"password": "short", "password2": "short"})
         self.assertIn("12", response.text)

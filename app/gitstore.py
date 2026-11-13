@@ -22,15 +22,26 @@ class TransientGitRead(SyncBlocked):
     """A retryable remote read into scratch storage, never a persistent write."""
 
 
+class RemoteReadUnavailable(SyncBlocked):
+    """Bounded read attempts exhausted; the caller must check its write intent."""
+
+
+class MirrorUnavailable(SyncBlocked):
+    """Optional anonymous mirror rejected the read; use official transport."""
+
+
+LOCAL_FAILURES = ("no space left", "disk quota", "read-only file system", "cannot allocate memory",
+                  "out of memory", "resource temporarily unavailable", "cannot create thread",
+                  "too many open files", "died of signal", "permission denied")
+
+
 def transient_read_error(stderr):
     value = stderr.lower()
     permanent = ("certificate", "authentication", "permission denied", "not found", "access denied",
-                 "no space left", "disk quota", "read-only file system", "cannot allocate memory",
-                 "out of memory", "resource temporarily unavailable", "cannot create thread",
-                 "too many open files", "died of signal", "not a git repository", "bad config",
+                 "not a git repository", "bad config",
                  "unknown option", "dubious ownership", "transport 'https' not allowed",
                  "non-fast-forward", "would clobber existing tag")
-    if any(marker in value for marker in permanent):
+    if any(marker in value for marker in permanent + LOCAL_FAILURES):
         return False
     if re.search(r"(?:returned error:|response(?: code)?[: ]+|http/[12](?:\.\d+)? )\s*(401|403|404|410|429)\b", value):
         return False
@@ -71,6 +82,7 @@ class GitStore:
         self.source, self.target = source, target
         self.tokens = {"source": source_token, "target": target_token}
         self.temporary = None
+        self.public_source = False
 
     def __enter__(self):
         self.check_space()
@@ -110,9 +122,11 @@ class GitStore:
                        GIT_CONFIG_VALUE_0="Authorization: Basic " + auth)
         return env
 
-    def run(self, *args, side=None, allowed=(0,), hooks=None, local=False, input_text=None):
+    def run(self, *args, side=None, allowed=(0,), hooks=None, local=False, input_text=None, mirror=False):
         if local and side is not None:
             raise SyncBlocked("本地保存不能附带远端凭据。")
+        if mirror and (not self.public_source or side != "source" or args[0] != "fetch" or local):
+            raise SyncBlocked("加速器仅允许匿名读取已核实的公开上游。")
         settings = ("credential.helper=", "core.hooksPath=" + str(hooks or self.path / "no-hooks"),
                     "init.templateDir=", "protocol.allow=never", "protocol.https.allow=always",
                     "http.followRedirects=false", "gc.auto=0", "maintenance.auto=false",
@@ -122,7 +136,13 @@ class GitStore:
         command = ["git"]
         for setting in settings:
             command += ["-c", setting]
-        env = self.env(side)
+        env = self.env(None if mirror else side)
+        if mirror:
+            # Never inherit a proxy credential or GitHub authorization in mirror traffic.
+            env = {k: v for k, v in env.items() if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+            command += ["-c", "http.proxy="]
+        if args[0] in ("ls-remote", "fetch") and side and not local:
+            command += ["-c", "http.lowSpeedLimit=1024", "-c", "http.lowSpeedTime=60"]
         if local:
             # Only controller-owned archive/temporary paths use the file transport.
             env["GIT_ALLOW_PROTOCOL"] = "file"
@@ -154,13 +174,18 @@ class GitStore:
                 proc.wait()
                 if operation == "ls-remote" and side:
                     raise TransientGitRead("Git 只读引用检查超时，未重试任何推送。") from None
-                message = ("Git 只读拉取超时，未推送；请检查网络与仓库容量后重新预览。"
-                           if args[0] == "fetch" and side else
-                           "Git 操作超时；若已推送，须核对远端结果后再恢复。")
+                if args[0] == "fetch" and side and not local:
+                    # A full 30-minute transfer is not immediately repeated three times.
+                    raise RemoteReadUnavailable("Git 只读拉取超时，本轮读取未完成。") from None
+                message = "Git 操作超时；若已推送，须核对远端结果后再恢复。"
                 raise SyncBlocked(message) from None
             if code not in allowed:
                 errors.seek(0)
-                if code > 0 and operation in ("ls-remote", "fetch") and side and not local and transient_read_error(errors.read(8192).decode("utf-8", errors="replace")):
+                failure = errors.read(8192).decode("utf-8", errors="replace").lower()
+                if mirror and code > 0 and not any(m in failure for m in LOCAL_FAILURES) and any(
+                        m in failure for m in ("certificate", "authentication", "not found", "access denied", "redirect", "returned error:", "connect tunnel failed")):
+                    raise MirrorUnavailable("公开加速器无法提供读取，改用官方地址。")
+                if code > 0 and operation in ("ls-remote", "fetch") and side and not local and transient_read_error(failure):
                     raise TransientGitRead("Git 远端读取未完成，正在有限重试。")
                 stage = {"source": "来源", "target": "目标"}.get(side, "本地")
                 raise SyncBlocked("Git 操作失败（" + stage + " " + operation + "，退出码 " + str(code)
@@ -171,15 +196,15 @@ class GitStore:
                 raise SyncBlocked("Git 返回数据超出安全上限，停止处理不完整结果。")
             return code, data.decode("utf-8", errors="strict")
 
-    def read_remote(self, *args, side):
+    def read_remote(self, *args, side, mirror=False):
         if args[0] not in ("ls-remote", "fetch"):
             raise SyncBlocked("只读重试不能用于持久保存或推送。")
         for attempt in range(3):
             try:
-                return self.run(*args, side=side)
+                return self.run(*args, side=side, **({"mirror": True} if mirror else {}))
             except TransientGitRead:
                 if attempt == 2:
-                    raise SyncBlocked("Git 远端读取（" + args[0] + "）在 3 次尝试后仍不可用，已停写；请检查网络后重新预览。") from None
+                    raise RemoteReadUnavailable("Git 远端读取（" + args[0] + "）在 3 次尝试后仍不可用。") from None
                 time.sleep(2 ** attempt)
 
     def refs(self, side):
@@ -198,17 +223,41 @@ class GitStore:
         self.check_space()
         if not snapshot:
             return
-        self.read_remote("fetch", "--no-tags", "--no-recurse-submodules", self.url(side),
-                         f"refs/heads/*:refs/{side}/heads/*", f"refs/tags/*:refs/{side}/tags/*", side=side)
+        origin = os.environ.get("FORKIQ_PUBLIC_GIT_MIRROR", "").rstrip("/") if self.public_source and side == "source" else ""
+        if origin and origin not in ("https://gh-proxy.com", "https://gh-proxy.org"):
+            raise SyncBlocked("公开 Git 加速器地址不在已核验列表中。")
+        mirrored = False
+        if origin:
+            try:
+                self.read_remote("fetch", "--atomic", "--no-tags", "--no-recurse-submodules", origin + "/" + self.url(side),
+                                 "refs/heads/*:refs/mirror/heads/*", "refs/tags/*:refs/mirror/tags/*", side=side, mirror=True)
+                mirrored = self.fetched_refs("mirror") == snapshot and not (self.path / "shallow").exists()
+            except (RemoteReadUnavailable, MirrorUnavailable):
+                pass
+            if mirrored:
+                self.run("fsck", "--connectivity-only", "--no-dangling")
+                script = "start\n" + "".join(f"update refs/source/{ref[5:]} {sha}\n" for ref, sha in sorted(snapshot.items())) + "prepare\ncommit\n"
+                self.run("update-ref", "--stdin", input_text=script)
+            # Mirror refs never become the source snapshot or a deletion baseline.
+            refs = self.fetched_refs("mirror")
+            if refs:
+                self.run("update-ref", "--stdin", input_text="".join(f"delete refs/mirror/{ref[5:]}\n" for ref in refs))
+        if not mirrored:
+            self.read_remote("fetch", "--atomic", "--no-tags", "--no-recurse-submodules", self.url(side),
+                             f"refs/heads/*:refs/{side}/heads/*", f"refs/tags/*:refs/{side}/tags/*", side=side)
+        actual = self.fetched_refs(side)
+        if actual != snapshot or (self.path / "shallow").exists():
+            raise SyncBlocked("拉取期间引用变化或历史不完整，未写入目标。")
+        self.run("fsck", "--connectivity-only", "--no-dangling")
+        self.check_space()
+
+    def fetched_refs(self, side):
         _, text = self.run("for-each-ref", "--format=%(objectname) %(refname)", f"refs/{side}/")
         actual = {}
         for line in text.splitlines():
             sha, ref = line.split(" ", 1)
             actual[ref.replace(f"refs/{side}/", "refs/", 1)] = sha
-        if actual != snapshot or (self.path / "shallow").exists():
-            raise SyncBlocked("拉取期间引用变化或历史不完整，未写入目标。")
-        self.run("fsck", "--connectivity-only", "--no-dangling")
-        self.check_space()
+        return actual
 
     def is_ancestor(self, old, new):
         code, _ = self.run("merge-base", "--is-ancestor", old, new, allowed=(0, 1))

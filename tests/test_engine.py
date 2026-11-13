@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from app.db import DB, insert_repository
 from app.engine import Worker, register, run_cycle, source_client, verify_live
-from app.gitstore import SyncBlocked
+from app.gitstore import SyncBlocked, RemoteReadUnavailable
 from test_safefork import A, B, MAIN, MemoryStore, config, metadata
 
 
@@ -222,8 +222,97 @@ class EngineTests(unittest.TestCase):
             with self.assertRaises(SyncBlocked):
                 source_client({**cfg, "source_secret": "../outside"}, self.client)
 
+    def test_read_retry_is_durable_due_bounded_and_cleared_on_success(self):
+        self.add()
+        fetch = self.store.fetch
+        self.store.fetch = Mock(side_effect=RemoteReadUnavailable("read unavailable"))
+        with patch("app.engine.time.time", return_value=1000):
+            self.cycle()
+        self.assertEqual((self.row()["enabled"], self.row()["review_required"], self.row()["status"]), (1, 0, "retrying"))
+        self.assertEqual((self.row()["retry_count"], self.row()["next_retry_at"]), (1, 1060))
+        self.db.close()
+        with patch("app.engine.time.time", return_value=1059):
+            self.cycle()  # natural schedule cannot bypass backoff
+            self.cycle(only_requested=True)
+        self.store.fetch.assert_called_once()
+        self.store.fetch = fetch
+        with patch("app.engine.time.time", return_value=1060):
+            self.cycle(only_requested=True)
+        self.assertEqual((self.row()["retry_count"], self.row()["next_retry_at"], self.row()["status"]), (0, 0, "synced"))
+
+    def test_read_retry_budget_exhaustion_stops_and_never_writes(self):
+        self.add()
+        self.store.refs = Mock(side_effect=RemoteReadUnavailable("read unavailable"))
+        clock = 1000
+        for count, delay in enumerate((60, 300, 900, 1800, 3600), 1):
+            with patch("app.engine.time.time", return_value=clock):
+                self.cycle(only_requested=count > 1)
+            self.assertEqual((self.row()["retry_count"], self.row()["next_retry_at"]), (count, clock + delay))
+            clock += delay
+        with patch("app.engine.time.time", return_value=clock):
+            self.cycle(only_requested=True)
+        self.assertEqual((self.row()["enabled"], self.row()["next_retry_at"]), (0, 0))
+        self.assertIn("耗尽", self.row()["last_error"])
+        self.assertEqual(self.store.writes, [])
+        self.cycle()
+        self.assertEqual(self.store.refs.call_count, 6)
+
+    def test_read_error_after_save_or_push_never_auto_retries(self):
+        for stage in ("preserve", "push"):
+            self.db.run("DELETE FROM repositories")
+            repo = self.add()
+            self.store = MemoryStore()
+            setattr(self.store, stage, Mock(side_effect=RemoteReadUnavailable("read unavailable")))
+            self.cycle()
+            self.cycle()
+            getattr(self.store, stage).assert_called_once()
+            self.assertEqual((self.row(repo)["enabled"], self.row(repo)["next_retry_at"]), (0, 0))
+
+    def test_pause_disconnect_and_preview_never_gain_retry_authority(self):
+        for action in ("pause", "disconnect", "preview"):
+            self.db.run("DELETE FROM repositories")
+            repo = self.add(enabled=int(action != "preview"), review=int(action == "preview"), dry=int(action == "preview"))
+            def fail(*args):
+                if action == "pause":self.pause()
+                if action == "disconnect":self.db.set_setting("github_installation_id", "changed")
+                raise RemoteReadUnavailable("read unavailable")
+            self.store.fetch = fail
+            self.cycle()
+            self.assertEqual((self.row(repo)["enabled"], self.row(repo)["next_retry_at"]), (0, 0))
+            self.assertEqual(self.store.writes, [])
+
+    def test_metadata_network_retry_but_auth_errors_stop(self):
+        from app.github import AuthError
+        for error in (RemoteReadUnavailable("read unavailable"), AuthError("denied")):
+            self.db.run("DELETE FROM repositories")
+            repo = self.add()
+            self.client.get_repo.side_effect = error
+            self.cycle()
+            self.assertEqual(self.row(repo)["status"], "retrying" if isinstance(error, RemoteReadUnavailable) else "needs_attention")
+            self.assertEqual(self.store.writes, [])
+
 
 class ScheduleTests(unittest.TestCase):
+    def test_due_retry_wakes_without_postponing_natural_schedule(self):
+        with tempfile.TemporaryDirectory() as root:
+            worker = Worker(root, str(Path(root) / "unused.pem"))
+            with closing(DB(Path(root) / "forkiq.db")) as db:
+                insert_repository(db, owner="owner", name="project", full_name="owner/project", upstream_full_name="upstream/project")
+                db.run("UPDATE repositories SET enabled=1,review_required=0,status='retrying',next_retry_at=20")
+                db.set_setting("check_interval", "60")
+            clock, calls = [0], []
+            def wait(seconds):
+                clock[0] += seconds
+                if clock[0] >= 70:worker.stop_flag.set()
+            def cycle(db, client, **kwargs):
+                calls.append((clock[0], kwargs["only_requested"]))
+                if clock[0] == 20:db.run("UPDATE repositories SET next_retry_at=0,status='synced'")
+            worker.wake = Mock(wait=wait)
+            with patch("app.engine.time.monotonic", side_effect=lambda: clock[0]), patch("app.engine.time.time", side_effect=lambda: clock[0]), \
+                 patch("app.engine.client_from_settings", return_value=Mock()), patch("app.engine.run_cycle", side_effect=cycle):
+                worker.run()
+            self.assertEqual(calls, [(0, False), (20, True), (60, False)])
+
     def test_completed_long_cycle_has_a_fresh_idle_heartbeat(self):
         with tempfile.TemporaryDirectory() as root:
             worker = Worker(root, str(Path(root) / "unused.pem"))

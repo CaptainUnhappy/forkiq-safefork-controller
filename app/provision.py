@@ -4,9 +4,9 @@ import shutil
 import time
 from pathlib import Path
 from .db import utcnow, log_event
-from .engine import parse_repo, app_client_from_settings, client_from_settings, verify_live
+from .engine import parse_repo, app_client_from_settings, client_from_settings, verify_live, RETRY_DELAYS, retry_message
 from .github import AuthError, RateLimited
-from .gitstore import GitStore, SyncBlocked, process_lock
+from .gitstore import GitStore, SyncBlocked, RemoteReadUnavailable, process_lock
 from .oauth import OAuthStore, authorized_client, installation_owner
 from .safefork import validate_identity, synchronize
 
@@ -98,7 +98,7 @@ def retry(db, job_id):
         raise SyncBlocked("任务没有等待恢复，请刷新查看。")
     if row["phase"] == "sync_intent":
         raise SyncBlocked("首次保存或推送结果待核对，请进入仓库详情运行预览，再确认恢复同步。")
-    db.run("UPDATE creation_jobs SET status='queued',last_error=NULL,updated_at=? WHERE id=? AND status='blocked'", (utcnow(), job_id))
+    db.run("UPDATE creation_jobs SET status='queued',last_error=NULL,retry_count=0,next_retry_at=0,updated_at=? WHERE id=? AND status='blocked'", (utcnow(), job_id))
 
 
 def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
@@ -106,10 +106,11 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
     with process_lock(root / "writer.lock"):
         # A process exit never silently repeats a write. Explicit recovery is required.
         db.run("UPDATE creation_jobs SET status='blocked',last_error='任务中断，请重新核对后继续。' WHERE status='working'")
-        row = db.one("SELECT * FROM creation_jobs WHERE status='queued' ORDER BY id LIMIT 1")
+        row = db.one("SELECT * FROM creation_jobs WHERE status='queued' OR (status='retrying' AND next_retry_at<=?) ORDER BY id LIMIT 1", (time.time(),))
         if not row or cancelled():
             return
         job = dict(row)
+        connection = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
         db.run("UPDATE creation_jobs SET status='working',last_error=NULL,updated_at=? WHERE id=?", (utcnow(), job["id"]))
         def phase(value, **fields):
             job.update(phase=value, **fields)
@@ -117,7 +118,6 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
             db.run("UPDATE creation_jobs SET " + ",".join(k + "=?" for k in fields) + " WHERE id=?", (*fields.values(), job["id"]))
         try:
             oauth, user = authorized_client(OAuthStore(root))
-            connection = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
             def check_authority():
                 current = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
                 if (cancelled() or current != connection
@@ -209,11 +209,27 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
                 if changed.rowcount != 1 or cancelled():
                     raise SyncBlocked("任务已暂停，首次结果需重新核对。")
                 conn.execute("INSERT OR REPLACE INTO sync_baselines VALUES(?,?)", (job["repo_id"], json.dumps(plan["source"], sort_keys=True)))
-                conn.execute("UPDATE creation_jobs SET status='complete',phase='complete',last_error=NULL,updated_at=? WHERE id=?", (stamp, job["id"]))
+                conn.execute("UPDATE creation_jobs SET status='complete',phase='complete',last_error=NULL,retry_count=0,next_retry_at=0,updated_at=? WHERE id=?", (stamp, job["id"]))
             log_event(db, job["repo_id"], "synced", "公开 SafeFork 已创建，完整保存与引用核对通过，已启用自动同步。")
         except Exception as error:
             message = str(error) if isinstance(error, (SyncBlocked, AuthError, RateLimited)) else "创建检查未完成，请核对授权、网络和容量后继续；未自动删除仓库。"
-            db.run("UPDATE creation_jobs SET status='blocked',last_error=?,updated_at=? WHERE id=?", (message, utcnow(), job["id"]))
+            if isinstance(error, RemoteReadUnavailable) and not cancelled():
+                with db.transaction() as conn:
+                    live = conn.execute("SELECT * FROM creation_jobs WHERE id=?", (job["id"],)).fetchone()
+                    repo = conn.execute("SELECT * FROM repositories WHERE id=?", (job.get("repo_id"),)).fetchone()
+                    current = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
+                    if (live["phase"] in ("preflight", "registered") and current == connection
+                            and (not job.get("repo_id") or (repo and repo["control_epoch"] == 0))
+                            and live["retry_count"] < len(RETRY_DELAYS)):
+                        count = live["retry_count"]
+                        message = retry_message(error, count + 1)
+                        when = time.time() + RETRY_DELAYS[count]
+                        conn.execute("UPDATE creation_jobs SET status='retrying',last_error=?,retry_count=?,next_retry_at=?,updated_at=? WHERE id=?",
+                                     (message, count + 1, when, utcnow(), job["id"]))
+                        if repo:
+                            conn.execute("UPDATE repositories SET status='retrying',last_error=?,last_check_at=? WHERE id=? AND control_epoch=0", (message, utcnow(), job["repo_id"]))
+                        return
+            db.run("UPDATE creation_jobs SET status='blocked',next_retry_at=0,last_error=?,updated_at=? WHERE id=?", (message, utcnow(), job["id"]))
             if job.get("repo_id"):
                 db.run("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',last_error=?,last_check_at=? WHERE id=? AND control_epoch=0",
                        (message, utcnow(), job["repo_id"]))

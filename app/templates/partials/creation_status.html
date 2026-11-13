@@ -1,7 +1,8 @@
 {% from "components.html" import timestamp with context %}
 <h2>{{ job.target }}</h2>
 <p>上游：{{ job.source }}</p>
-<p role="status">{{ {'queued':'等待执行','working':'正在执行','blocked':'需关注','complete':'创建完成'}[job.status] }} · {{ phases[job.phase] }}</p>
+<p role="status">{{ {'queued':'等待执行','working':'正在执行','retrying':'等待重试','blocked':'需关注','complete':'创建完成'}[job.status] }} · {{ phases[job.phase] }}</p>
+{% if job.status == 'retrying' %}<p>第 {{ job.retry_count }}/5 次自动重试预计于 {{ timestamp(job.next_retry_at | retry_time) }} 开始；队列繁忙时顺延。</p>{% endif %}
 <p class="field-help">最近更新：{{ timestamp(job.updated_at) }} · 进度自动刷新，可安全关闭页面。</p>
 {% if job.last_error %}<p class="notice warn" role="alert">{{ job.last_error }}</p>{% endif %}
 <div class="actions">

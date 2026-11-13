@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 import jwt
+from .gitstore import RemoteReadUnavailable
 
 API = "https://api.github.com"
 
@@ -52,11 +53,17 @@ class GitHub:
             except urllib.error.HTTPError as error:
                 status, response_headers = error.code, dict(error.headers)
                 error.close()
+                if method == "GET" and status in (500, 502, 503, 504) and attempt + 1 == attempts:
+                    raise RemoteReadUnavailable("GitHub 只读接口暂不可用（HTTP " + str(status) + "）。") from None
                 if status not in (500, 502, 503, 504) or attempt + 1 == attempts:
                     return status, {}, response_headers
             except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
                 reason = error.reason if isinstance(error, urllib.error.URLError) else error
-                if isinstance(reason, ssl.SSLCertVerificationError) or attempt + 1 == attempts:
+                if isinstance(reason, ssl.SSLCertVerificationError):
+                    raise RuntimeError("GitHub 证书验证失败，已停止连接。") from None
+                if attempt + 1 == attempts:
+                    if method == "GET":
+                        raise RemoteReadUnavailable("GitHub 只读接口连接失败，本轮读取未完成。") from None
                     raise RuntimeError("无法连接 GitHub，请检查网络。") from None
             time.sleep(2 ** attempt)
 

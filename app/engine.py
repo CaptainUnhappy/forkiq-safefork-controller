@@ -7,8 +7,14 @@ import time
 from pathlib import Path
 from .db import DB, insert_repository, log_event, utcnow
 from .github import GitHub
-from .gitstore import GitStore, SyncBlocked, process_lock
+from .gitstore import GitStore, SyncBlocked, RemoteReadUnavailable, process_lock
 from .safefork import repo_name, synchronize, validate_config, validate_identity
+
+RETRY_DELAYS = (60, 300, 900, 1800, 3600)
+
+
+def retry_message(error, count):
+    return f"{error} 尚未开始保存或推送，等待自动重试（{count}/{len(RETRY_DELAYS)}）。"
 
 
 def client_from_settings(db):
@@ -89,24 +95,27 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
             if cancelled():
                 return
             row = dict(original)
-            if only_requested and not (row["dry_run_requested"] or row["sync_requested"]):
+            requested = row["dry_run_requested"] or row["sync_requested"]
+            retry_due = row["next_retry_at"] and row["next_retry_at"] <= time.time()
+            if row["next_retry_at"] and not retry_due and not requested:
+                continue
+            if only_requested and not (requested or retry_due):
                 continue
             dry = bool(row["dry_run_requested"])
             if not dry and (not row["enabled"] or row["review_required"]):
                 continue
             db.run("UPDATE repositories SET dry_run_requested=0,sync_requested=0 WHERE id=?", (row["id"],))
+            intent_saved = False
+            connection = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
             try:
                 config = json.loads(row["config_json"] or "null")
                 if not isinstance(config, dict):
                     raise SyncBlocked("旧版仓库需显式重新登记安全配置，不能直接恢复。")
                 validate_config(config)
                 source = source_client(config, client)
-                connection = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
 
                 def guard():
                     verify_live(config, source, client)
-
-                intent_saved = False
 
                 def before_write():
                     nonlocal intent_saved
@@ -143,7 +152,7 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                 plan["checked_at"] = stamp
                 with db.transaction() as conn:
                     changed = conn.execute("UPDATE repositories SET plan_json=?,fork_sha=?,upstream_sha=?,last_check_at=?,"
-                       "last_success_at=?,last_error=NULL,review_required=0,enabled=?,status=?,updated_at=? "
+                       "last_success_at=?,last_error=NULL,review_required=0,enabled=?,status=?,updated_at=?,retry_count=0,next_retry_at=0 "
                        "WHERE id=? AND control_epoch=? AND config_json=?",
                        (json.dumps(plan, sort_keys=True), target_refs.get(dest), plan["source"].get(primary), stamp,
                         row["last_success_at"] if dry else stamp, enabled, "synced" if enabled else "paused", stamp,
@@ -156,8 +165,23 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                               f"清理 {len(plan.get('deletes', {}))} 个过期分支，保留 {len(plan['target_only'])} 个目标独有引用。")
             except Exception as error:
                 message = str(error) if isinstance(error, SyncBlocked) else "检查或连接失败；已停写，请核对凭据、网络与仓库状态后预览。"
+                if isinstance(error, RemoteReadUnavailable) and not dry and not intent_saved and not cancelled():
+                    count = row["retry_count"]
+                    with db.transaction() as conn:
+                        current = tuple(db.get_setting(k) for k in ("github_app_id", "github_installation_id", "github_pem_path"))
+                        if count < len(RETRY_DELAYS) and current == connection:
+                            message = retry_message(error, count + 1)
+                            changed = conn.execute("UPDATE repositories SET status='retrying',retry_count=?,next_retry_at=?,"
+                                "plan_json=NULL,last_error=?,last_check_at=?,updated_at=? WHERE id=? AND control_epoch=? "
+                                "AND config_json=? AND enabled=1 AND review_required=0",
+                                (count + 1, time.time() + RETRY_DELAYS[count], message, utcnow(), utcnow(),
+                                 row["id"], row["control_epoch"], row["config_json"]))
+                            if changed.rowcount:
+                                conn.execute("INSERT INTO events(repo_id,at,kind,message) VALUES(?,?,'retry',?)", (row["id"], utcnow(), message))
+                                continue
+                    message = str(error) + " 自动重试已耗尽或同步授权已变化，已暂停；请预览核对后恢复。"
                 db.run("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',"
-                       "plan_json=NULL,last_error=?,last_check_at=?,updated_at=? WHERE id=? AND control_epoch=?",
+                       "next_retry_at=0,plan_json=NULL,last_error=?,last_check_at=?,updated_at=? WHERE id=? AND control_epoch=?",
                        (message, utcnow(), utcnow(), row["id"], row["control_epoch"]))
                 log_event(db, row["id"], "blocked", message)
 
@@ -180,9 +204,10 @@ class Worker(threading.Thread):
             while not self.stop_flag.is_set():
                 self.last_tick = time.monotonic()
                 requested = db.one("SELECT id FROM repositories WHERE dry_run_requested=1 OR sync_requested=1 LIMIT 1")
-                creating = db.one("SELECT id FROM creation_jobs WHERE status IN ('queued','working') LIMIT 1")
+                retrying = db.one("SELECT id FROM repositories WHERE enabled=1 AND review_required=0 AND next_retry_at>0 AND next_retry_at<=? LIMIT 1", (time.time(),))
+                creating = db.one("SELECT id FROM creation_jobs WHERE status IN ('queued','working') OR (status='retrying' AND next_retry_at<=?) LIMIT 1", (time.time(),))
                 scheduled = time.monotonic() >= due
-                if requested or scheduled or creating:
+                if requested or scheduled or creating or retrying:
                     client = client_from_settings(db)
                     self.busy_since = time.monotonic()
                     try:
@@ -190,7 +215,7 @@ class Worker(threading.Thread):
                             if creating:
                                 from .provision import run_jobs
                                 run_jobs(db, client, cancelled=self.stop_flag.is_set)
-                            if requested or scheduled:
+                            if requested or scheduled or retrying:
                                 run_cycle(db, client, cancelled=self.stop_flag.is_set, only_requested=not scheduled)
                     except Exception:
                         log_event(db, None, "error", "同步检查未完成；请检查 worker 锁和存储。")

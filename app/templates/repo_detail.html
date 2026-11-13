@@ -8,6 +8,7 @@
 <a class="back-link" href="{{ base_path }}/repos">返回仓库列表</a>
 {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
 {% if repo.last_error %}<p id="repo-error" class="notice warn" role="alert">{{ repo.last_error }}</p>{% endif %}
+{% if repo.next_retry_at and repo.enabled %}<p role="status">第 {{ repo.retry_count }}/5 次自动重试预计于 {{ timestamp(repo.next_retry_at | retry_time) }} 开始；队列繁忙时顺延。可点击暂停取消重试。</p>{% endif %}
 <section class="card">
   <h2>安全同步</h2>
   <p>分支更新仅创建或快进，已有标签不改写。{% if config and config.prune_deleted_branches %}上游已删除的受管分支会安全清理。{% else %}上游删除的引用继续保留。{% endif %}来源变化、冲突或目标 Actions 开启时停止。</p>

@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from app.db import DB
 from app import oauth, provision
 from app.github import GitHub
-from app.gitstore import SyncBlocked
+from app.gitstore import SyncBlocked, RemoteReadUnavailable
 from test_safefork import config, metadata, MemoryStore, MAIN, A, B
 REAL_PUBLIC_SOURCE = provision.public_source
 
@@ -244,6 +244,39 @@ class CreationTests(unittest.TestCase):
         with patch.object(provision.shutil, "disk_usage", return_value=Mock(free=1024)):
             with self.assertRaisesRegex(SyncBlocked, "容量"): self.enqueue()
         self.oauth.create_fork.assert_not_called()
+
+    def test_network_before_first_save_retries_without_recreating_or_reisolating(self):
+        self.enqueue()
+        self.store.fetch = Mock(side_effect=[RemoteReadUnavailable("network"), None, None])
+        with patch("app.provision.time.time", return_value=1000):
+            self.run_job()
+            self.run_job()
+        row = self.db.one("SELECT * FROM creation_jobs")
+        self.assertEqual((row["status"], row["phase"], row["next_retry_at"]), ("retrying", "registered", 1060))
+        self.store.fetch.assert_called_once()
+        with patch("app.provision.time.time", return_value=1060):
+            self.run_job()
+        self.assertEqual(self.db.one("SELECT status FROM creation_jobs")[0], "complete")
+        self.oauth.create_fork.assert_called_once()
+        self.oauth.isolate.assert_called_once()
+
+    def test_network_after_create_or_sync_intent_does_not_auto_retry(self):
+        self.enqueue()
+        self.oauth.create_fork.side_effect = RemoteReadUnavailable("unknown create result")
+        self.run_job()
+        self.run_job()
+        self.assertEqual(self.db.one("SELECT status FROM creation_jobs")[0], "blocked")
+        self.oauth.create_fork.assert_called_once()
+
+    def test_pause_cancels_registered_creation_retry(self):
+        self.enqueue()
+        self.store.fetch = Mock(side_effect=RemoteReadUnavailable("network"))
+        with patch("app.provision.time.time", return_value=1000):self.run_job()
+        self.db.run("UPDATE repositories SET status='paused',control_epoch=control_epoch+1")
+        with patch("app.provision.time.time", return_value=1060):self.run_job()
+        self.assertEqual(self.db.one("SELECT status FROM creation_jobs")[0], "blocked")
+        self.assertEqual(self.db.one("SELECT status FROM repositories")[0], "paused")
+        self.assertEqual(self.store.writes, [])
 
 
 class MetadataPreflightTests(unittest.TestCase):
