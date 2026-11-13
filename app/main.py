@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .db import DB, log_event, utcnow
 from .engine import Worker, app_client_from_settings, client_from_settings, register
-from .github import exchange_manifest, write_pem
+from .github import exchange_manifest, write_pem, AuthError, RateLimited
 from .gitstore import SyncBlocked
 from .errors import error_guidance
 from .versions import annotate, short_time
@@ -221,7 +221,7 @@ def create_submit(request: Request, csrf: str = Form(""), source: str = Form("")
     try:
         job_id = provision.enqueue(db, source)
     except Exception as failure:
-        message = str(failure) if isinstance(failure, SyncBlocked) else "无法验证公开来源或创建授权，请检查链接、账号和网络。"
+        message = str(failure) if isinstance(failure, (SyncBlocked, AuthError, RateLimited)) else "无法验证公开来源或创建授权，请检查链接、账号和网络。"
         return render(request, "create.html", oauth=oauth_context(), error=message, source=source)
     worker.request_sync()
     return redirect(request, f"/create/{job_id}")

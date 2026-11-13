@@ -4,8 +4,8 @@ import shutil
 import time
 from pathlib import Path
 from .db import utcnow, log_event
-from .engine import parse_repo, app_client_from_settings, verify_live
-from .github import GitHub
+from .engine import parse_repo, app_client_from_settings, client_from_settings, verify_live
+from .github import AuthError, RateLimited
 from .gitstore import GitStore, SyncBlocked, process_lock
 from .oauth import OAuthStore, authorized_client, installation_owner
 from .safefork import validate_identity, synchronize
@@ -15,8 +15,8 @@ PHASES = {"preflight": "检查来源和容量", "create_intent": "等待 GitHub 
           "registered": "完整保存并首次同步", "sync_intent": "核对首次同步结果", "complete": "已启用自动同步"}
 
 
-def public_source(name):
-    meta = GitHub(token="").get_repo(name)
+def public_source(name, client):
+    meta = client.get_repo(name)
     if (meta.get("full_name") != name or type(meta.get("id")) is not int
             or meta.get("private") is not False or meta.get("visibility") != "public"
             or not meta.get("default_branch") or meta.get("disabled") is True):
@@ -33,9 +33,8 @@ def capacity(root, meta):
         raise SyncBlocked("服务器剩余容量不足以完整保存此仓库，请先调整容量。")
 
 
-def same_network_fork(source, owner):
-    """Anonymous public metadata only; never enumerate private account repositories."""
-    api = GitHub(token="")
+def same_network_fork(source, owner, api):
+    """Public-only listing with authorized metadata quota; no private inventory."""
     network = (source.get("source") or source).get("id")
     for page in range(1, 11):
         rows = api._api("GET", f"/users/{owner}/repos?type=owner&per_page=100&page={page}")
@@ -44,6 +43,8 @@ def same_network_fork(source, owner):
         for row in rows:
             if row.get("private") is False and row.get("fork") is True:
                 full = api.get_repo(row["full_name"])
+                if full.get("private") is not False or full.get("visibility") != "public":
+                    raise SyncBlocked("检查期间公开 Fork 可见性变化，已停止创建。")
                 if (full.get("source") or full.get("parent") or {}).get("id") == network:
                     raise SyncBlocked("账号已有同源 Fork：" + full["full_name"] + "；请先决定复用哪个目标。")
         if len(rows) < 100:
@@ -53,7 +54,10 @@ def same_network_fork(source, owner):
 
 def enqueue(db, source):
     source = parse_repo(source)
-    meta = public_source(source)
+    client = client_from_settings(db)
+    if client is None:
+        raise SyncBlocked("请先连接专用 GitHub App。")
+    meta = public_source(source, client)
     root = Path(db.path).parent
     oauth, user = authorized_client(OAuthStore(root))
     owner = installation_owner(app_client_from_settings(db), db.get_setting("github_installation_id"))
@@ -73,7 +77,6 @@ def enqueue(db, source):
     if db.one("SELECT id FROM repositories WHERE full_name=? COLLATE NOCASE", (target,)) or oauth.repo(target, missing=True):
         raise SyncBlocked("目标名称已存在，请使用登记已有仓库入口；不会覆盖或自动改名。")
     capacity(root, meta)
-    same_network_fork(meta, owner["login"])
     with db.transaction() as conn:
         existing = conn.execute("SELECT id FROM creation_jobs WHERE source_id=? AND account_id=?", (meta["id"], owner["id"])).fetchone()
         if existing:
@@ -123,14 +126,14 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
             owner = installation_owner(app_client_from_settings(db), db.get_setting("github_installation_id"))
             if user.get("id") != job["account_id"] or owner["id"] != job["account_id"] or user.get("login") != job["target"].split("/")[0]:
                 raise SyncBlocked("任务的 GitHub 账号发生变化。")
-            source = public_source(job["source"])
+            source = public_source(job["source"], client)
             if source["id"] != job["source_id"] or source["default_branch"] != job["primary_branch"]:
                 raise SyncBlocked("创建期间来源身份或默认分支变化，已停写。")
             capacity(root, source)
             if job["phase"] == "preflight":
                 if oauth.repo(job["target"], missing=True):
                     raise SyncBlocked("目标名称已被占用，未覆盖现有仓库。")
-                same_network_fork(source, user["login"])
+                same_network_fork(source, user["login"], client)
                 check_authority()
                 phase("create_intent")
                 target = oauth.create_fork(job["source"], job["target"].split("/")[1])
@@ -209,7 +212,7 @@ def run_jobs(db, client, cancelled=lambda: False, store_type=GitStore):
                 conn.execute("UPDATE creation_jobs SET status='complete',phase='complete',last_error=NULL,updated_at=? WHERE id=?", (stamp, job["id"]))
             log_event(db, job["repo_id"], "synced", "公开 SafeFork 已创建，完整保存与引用核对通过，已启用自动同步。")
         except Exception as error:
-            message = str(error) if isinstance(error, SyncBlocked) else "创建检查未完成，请核对授权、网络和容量后继续；未自动删除仓库。"
+            message = str(error) if isinstance(error, (SyncBlocked, AuthError, RateLimited)) else "创建检查未完成，请核对授权、网络和容量后继续；未自动删除仓库。"
             db.run("UPDATE creation_jobs SET status='blocked',last_error=?,updated_at=? WHERE id=?", (message, utcnow(), job["id"]))
             if job.get("repo_id"):
                 db.run("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',last_error=?,last_check_at=? WHERE id=? AND control_epoch=0",

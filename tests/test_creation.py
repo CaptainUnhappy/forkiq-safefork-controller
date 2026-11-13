@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, parse_qs
 from unittest.mock import Mock, patch
 from app.db import DB
 from app import oauth, provision
+from app.github import GitHub
 from app.gitstore import SyncBlocked
 from test_safefork import config, metadata, MemoryStore, MAIN, A, B
 REAL_PUBLIC_SOURCE = provision.public_source
@@ -126,6 +127,7 @@ class CreationTests(unittest.TestCase):
         self.client.has_active_runs.return_value = False
         self.store = MemoryStore()
         self.patches = [patch.object(provision, "public_source", return_value=self.source),
+                        patch.object(provision, "client_from_settings", return_value=self.client),
                         patch.object(provision, "authorized_client", return_value=(self.oauth, self.user)),
                         patch.object(provision, "installation_owner", return_value=self.user),
                         patch.object(provision, "same_network_fork"),
@@ -146,6 +148,7 @@ class CreationTests(unittest.TestCase):
 
     def test_one_click_persists_archive_then_enables_and_duplicate_is_same_job(self):
         job = self.enqueue()
+        provision.same_network_fork.assert_not_called()
         self.assertEqual(self.enqueue(), job)
         self.run_job()
         row = self.db.one("SELECT * FROM creation_jobs")
@@ -235,9 +238,35 @@ class CreationTests(unittest.TestCase):
         self.assertEqual(self.db.one("SELECT status FROM repositories")[0], "paused")
 
     def test_private_metadata_and_insufficient_capacity_rejected(self):
-        with patch.object(provision.GitHub, "get_repo", return_value={**self.source, "private": True}):
+        with patch.object(GitHub, "get_repo", return_value={**self.source, "private": True}):
             # Exercise real metadata validation rather than the setUp fixture wrapper.
-            with self.assertRaises(SyncBlocked): REAL_PUBLIC_SOURCE("upstream/project")
+            with self.assertRaises(SyncBlocked): REAL_PUBLIC_SOURCE("upstream/project",GitHub(token="fixture"))
         with patch.object(provision.shutil, "disk_usage", return_value=Mock(free=1024)):
             with self.assertRaisesRegex(SyncBlocked, "容量"): self.enqueue()
         self.oauth.create_fork.assert_not_called()
+
+
+class MetadataPreflightTests(unittest.TestCase):
+    def test_many_public_forks_use_authorized_metadata_without_anonymous_requests(self):
+        api = Mock()
+        api._api.return_value = [dict(full_name=f"owner/fork-{i}",private=False,fork=True) for i in range(70)]
+        api.get_repo.side_effect = lambda name: dict(full_name=name,private=False,visibility="public",parent={"id":99})
+        with patch.object(GitHub, "_request", side_effect=AssertionError("anonymous quota must not be used")):
+            provision.same_network_fork({"id":11}, "owner", api)
+        self.assertEqual(api.get_repo.call_count,70)
+
+    def test_authorized_source_metadata_still_rejects_private_before_creation(self):
+        api = Mock()
+        api.get_repo.return_value = dict(full_name="source/private",id=11,private=True,visibility="private",default_branch="main")
+        with self.assertRaisesRegex(SyncBlocked,"公开"):
+            REAL_PUBLIC_SOURCE("source/private",api)
+
+    def test_same_network_and_visibility_change_still_stop_before_fork_creation(self):
+        api=Mock()
+        api._api.return_value=[dict(full_name="owner/previous",private=False,fork=True)]
+        api.get_repo.return_value=dict(full_name="owner/previous",private=False,visibility="public",source={"id":11})
+        with self.assertRaisesRegex(SyncBlocked,"已有同源"):
+            provision.same_network_fork({"id":11},"owner",api)
+        api.get_repo.return_value=dict(full_name="owner/previous",private=True,visibility="private")
+        with self.assertRaisesRegex(SyncBlocked,"可见性"):
+            provision.same_network_fork({"id":11},"owner",api)
