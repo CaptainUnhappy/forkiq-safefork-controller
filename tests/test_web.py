@@ -211,6 +211,19 @@ class WebTests(unittest.TestCase):
         self.worker.busy_since = time.monotonic() - 3601
         self.assertEqual(self.client.get("/healthz").status_code, 503)
 
+    def test_health_detects_pid_exhaustion_but_paused_repos_are_healthy(self):
+        self.repo()
+        with patch.object(main,'process_capacity',return_value=dict(current=63,limit=64,available=1)):
+            response=self.client.get('/healthz')
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.json()['status'],'process_capacity_exhausted')
+        with patch.object(main,'process_capacity',return_value=dict(current=5,limit=64,available=59)):
+            self.assertEqual(self.client.get('/healthz').status_code,200)
+        with patch.object(main,'process_capacity',side_effect=main.SyncBlocked('unreadable')):
+            response=self.client.get('/healthz')
+            self.assertEqual(response.status_code,503)
+            self.assertEqual(response.json()['status'],'process_capacity_unknown')
+
     def test_manifest_no_actions_or_administration_write(self):
         with patch.dict(os.environ, FORKIQ_PUBLIC_URL="https://controller.example.invalid"):
             _, manifest = main.manifest_payload()

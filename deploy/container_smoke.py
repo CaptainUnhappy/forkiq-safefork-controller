@@ -32,7 +32,7 @@ def check(image, memory_mib=128, report=None):
     container = None
     docker("volume", "create", "--label", "safefork-test=" + nonce, volume)
     try:
-        container = docker("run", "-d", "--name", name, "--label", "safefork-test=" + nonce,
+        container = docker("run", "-d", "--init", "--name", name, "--label", "safefork-test=" + nonce,
                            "--read-only", "--tmpfs", "/tmp:size=64m,mode=1777", "--cap-drop=ALL",
                            "--security-opt=no-new-privileges:true", f"--memory={memory_mib}m", f"--memory-swap={memory_mib}m",
                            "--cpus=1", "--pids-limit=64",
@@ -45,6 +45,7 @@ def check(image, memory_mib=128, report=None):
         assert docker("exec", container, "id", "-u") == "10001"
         info = json.loads(docker("inspect", container))[0]
         assert info["HostConfig"]["ReadonlyRootfs"] is True
+        assert info["HostConfig"]["Init"] is True
         assert info["HostConfig"]["Memory"] == memory_mib * 1024 ** 2
         cookies = http.cookiejar.CookieJar()
         client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
@@ -74,9 +75,16 @@ def check(image, memory_mib=128, report=None):
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_safefork.py")
         docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_creation.py")
-        for suite in ("test_engine.py", "test_network.py"):
+        for suite in ("test_engine.py", "test_network.py", "test_resources.py"):
             docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                    container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", suite)
+        reaping = json.loads(docker("exec", "-e", "PYTHONPATH=/opt/forkiq", container,
+                                   "python", "/opt/controller-tests/process_reaping_probe.py", "--cycles", "100"))
+        assert reaping["cycles"] == 100 and reaping["zombies_after"] == 0 and reaping["post_failure_git"] == "passed"
+        with urllib.request.urlopen(origin + "/healthz", timeout=5) as response:
+            resource_health = json.load(response)
+        assert resource_health["status"] == "ok" and resource_health["process_capacity"]["available"] >= 8
+        print("PASS: 100 repeated read failures/timeouts; no orphan accumulation; Git still works", flush=True)
         peak = int(docker("exec", container, "python", "-c",
                           "from pathlib import Path; p=Path('/sys/fs/cgroup/memory.peak'); "
                           "p=p if p.exists() else Path('/sys/fs/cgroup/memory/memory.max_usage_in_bytes'); print(p.read_text())"))
@@ -104,6 +112,7 @@ def check(image, memory_mib=128, report=None):
             Path(report).parent.mkdir(parents=True, exist_ok=True)
             Path(report).write_text(json.dumps({"image": image, "memory_limit_mib": memory_mib,
                                                "peak_bytes": peak, "git_tests": "passed", "restart": "passed",
+                                               "process_reaping": reaping, "resource_health": resource_health,
                                                "production_credentials": False}, indent=2) + "\n", encoding="utf-8")
         print(f"PASS: non-root cold start, live worker, read-only root, {memory_mib} MiB limit, volume restart, no GitHub credentials/repos")
     except BaseException:

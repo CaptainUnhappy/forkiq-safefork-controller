@@ -1,5 +1,6 @@
 services:
   controller:
+    init: true
     build: .
     image: forkiq-safefork-controller:local
     ports:

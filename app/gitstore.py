@@ -1,5 +1,6 @@
 """Isolated full-history Git transport; never checks out managed code."""
 import base64
+import errno
 import json
 import os
 import re
@@ -32,7 +33,29 @@ class MirrorUnavailable(SyncBlocked):
 
 LOCAL_FAILURES = ("no space left", "disk quota", "read-only file system", "cannot allocate memory",
                   "out of memory", "resource temporarily unavailable", "cannot create thread",
-                  "too many open files", "died of signal", "permission denied")
+                  "too many open files", "died of signal", "permission denied", "cannot fork")
+RESOURCE_MESSAGE = "运行资源不足，Git 无法启动或完成辅助进程；已停写，请检查进程回收、内存与文件句柄。"
+
+
+def process_capacity(root=Path("/sys/fs/cgroup")):
+    """Read the container's PID budget without spawning another process (v2/v1)."""
+    for directory in (root, root / "pids"):
+        try:
+            limit = (directory / "pids.max").read_text().strip()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise SyncBlocked("容器进程配额状态无法读取，已停止 Git 操作。") from None
+        try:
+            if limit == "max":
+                return None
+            limit, current = int(limit), int((directory / "pids.current").read_text())
+            if limit > 0 and current >= 0:
+                return {"current": current, "limit": limit, "available": max(0, limit - current)}
+            raise ValueError
+        except (OSError, ValueError):
+            raise SyncBlocked("容器进程配额状态无效或不完整，已停止 Git 操作。") from None
+    return None
 
 
 def transient_read_error(stderr):
@@ -128,6 +151,9 @@ class GitStore:
             raise SyncBlocked("本地保存不能附带远端凭据。")
         if mirror and (not self.public_source or side != "source" or args[0] != "fetch" or local):
             raise SyncBlocked("加速器仅允许匿名读取已核实的公开上游。")
+        capacity = process_capacity()
+        if capacity is not None and capacity["available"] < 8:
+            raise SyncBlocked(RESOURCE_MESSAGE)
         settings = ("credential.helper=", "core.hooksPath=" + str(hooks or self.path / "no-hooks"),
                     "init.templateDir=", "protocol.allow=never", "protocol.https.allow=always",
                     "http.followRedirects=false", "gc.auto=0", "maintenance.auto=false",
@@ -155,9 +181,14 @@ class GitStore:
             if input_text is not None:
                 incoming.write(input_text.encode("utf-8"))
                 incoming.seek(0)
-            proc = subprocess.Popen(command, cwd=self.path, env=env,
-                                    stdin=incoming if input_text is not None else subprocess.DEVNULL, stdout=output,
-                                    stderr=errors, start_new_session=True)
+            try:
+                proc = subprocess.Popen(command, cwd=self.path, env=env,
+                                        stdin=incoming if input_text is not None else subprocess.DEVNULL, stdout=output,
+                                        stderr=errors, start_new_session=True)
+            except OSError as error:
+                if error.errno in (errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE):
+                    raise SyncBlocked(RESOURCE_MESSAGE) from None
+                raise
             try:
                 # Initial full-history downloads may be much larger than later
                 # incremental checks. Never extend or retry a remote write.
@@ -183,6 +214,8 @@ class GitStore:
             if code not in allowed:
                 errors.seek(0)
                 failure = errors.read(8192).decode("utf-8", errors="replace").lower()
+                if any(marker in failure for marker in ("cannot fork", "resource temporarily unavailable", "cannot allocate memory", "cannot create thread", "too many open files", "out of memory")):
+                    raise SyncBlocked(RESOURCE_MESSAGE)
                 if mirror and code > 0 and not any(m in failure for m in LOCAL_FAILURES) and any(
                         m in failure for m in ("certificate", "authentication", "not found", "access denied", "redirect", "returned error:", "connect tunnel failed")):
                     raise MirrorUnavailable("公开加速器无法提供读取，改用官方地址。")

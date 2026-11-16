@@ -62,7 +62,9 @@ docker compose up -d
 docker compose ps
 ```
 
-默认仅绑定 `127.0.0.1:8792`，非 root、只读根文件系统、单 worker，无 Docker socket。首次设置完成前不要公开管理入口；先通过受控本机/SSH 隧道访问，设置至少 12 位密码，再接入自己的 HTTPS 反向代理。代理须正确设置 HTTPS 转发头，并限制管理访问；不要直接暴露容器端口。
+默认仅绑定 `127.0.0.1:8792`，非 root、只读根文件系统、单 worker，无 Docker socket。Compose 必须保留 `init: true`；直接 `docker run` 时必须加 `--init`，由轻量 init 回收 Git 退出或超时后留下的孤儿进程。仅等待直接子进程不足以完成容器级回收，不应靠提高进程上限掩盖持续累积。
+
+首次设置完成前不要公开管理入口；先通过受控本机/SSH 隧道访问，设置至少 12 位密码，再接入自己的 HTTPS 反向代理。代理须正确设置 HTTPS 转发头，并限制管理访问；不要直接暴露容器端口。
 
 共用现有 HTTPS 443 时，将 `FORKIQ_PUBLIC_URL` 设置为 `https://你的主机/SafeFork`，重建容器以应用路径配置；状态卷必须保留。把以下 location 加到既有 HTTPS server 中，无需新建公网端口：
 
@@ -124,7 +126,9 @@ docker compose -f compose.yaml -f compose.private.example.yaml up -d
 
 ## 故障处理
 
-检查仓库“需关注”状态、事件和最近检查时间；`/healthz` 同时检查 worker 活性，不只是 Web 进程。失败后先核对来源、权限和目标引用，再运行只读预览。不要用强推、移动标签、清库或重新开启 Actions 来“修复”。
+检查仓库“需关注”状态、事件和最近检查时间；`/healthz` 同时检查 worker 活性和 cgroup v1/v2 进程余量，少于 8 个名额时返回 503 `process_capacity_exhausted`。已存在的配额文件无法读取或数据不完整时，返回 503 `process_capacity_unknown`，Git 同样停写。没有 cgroup PID 配额文件或配置为无限制时，`process_capacity` 为 null，不能视为已验证资源充足。健康状态不证明仓库引用已同步，也不会因管理员主动暂停而报故障。
+
+Git 无法 fork、创建线程或分配运行资源时，明确提示资源不足并停写，不当作网络波动无限重试。检查 `docker stats` 的 PIDS、`docker inspect` 的 Init 和实际僵尸进程；在受控维护中重建带 init 的容器，保留状态卷。重建后仍须先核对来源、权限和目标引用，再运行只读预览并确认恢复。不要用强推、移动标签、清库或重新开启 Actions 来“修复”。
 
 暂停阻止后续推送，但不能撤回已发出的 Git 请求。GitHub Actions 开关、仓库可见性与 Git push 不是一个原子事务：管理员在检查之后改变这些设置仍可能破坏隔离。同步期间必须保持设置稳定，禁止并行管理操作；详见 [安全边界](SECURITY.md)。
 
@@ -142,7 +146,7 @@ node --test tests/test_ui.js
 python deploy/container_smoke.py --image forkiq-safefork-controller:local
 ```
 
-Windows 将 `.venv/bin/` 替换为 `.venv\Scripts\`。单元和真实 Git 测试仅使用合成数据；容器验收创建临时本地卷，不注入 GitHub 凭据。测试不能替代真实 GitHub App 的受控试点、24 小时自然调度观察和独立异地备份。
+Windows 将 `.venv/bin/` 替换为 `.venv\Scripts\`。单元和真实 Git 测试仅使用合成数据；容器验收创建临时本地卷，不注入 GitHub 凭据，并在 Web worker 同时运行时执行 100 次读取失败/超时循环，要求无孤儿累积、后续 Git 检查正常。故障探针只用于隔离测试容器，禁止在生产容器运行。测试不能替代真实 GitHub App 的受控试点、24 小时自然调度观察和独立异地备份。
 
 ## 许可
 

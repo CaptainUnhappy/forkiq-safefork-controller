@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from .db import DB, log_event, utcnow
 from .engine import Worker, app_client_from_settings, client_from_settings, register
 from .github import exchange_manifest, write_pem, AuthError, RateLimited
-from .gitstore import SyncBlocked
+from .gitstore import SyncBlocked, process_capacity
 from .errors import error_guidance
 from .versions import annotate, short_time
 from .oauth import OAuthStore
@@ -281,7 +281,15 @@ def healthz():
     now = time.monotonic()
     fresh = (now - worker.busy_since < 3600) if worker.busy_since else (now - worker.last_tick < 30)
     ok = worker.is_alive() and fresh
-    return JSONResponse({"status": "ok" if ok else "worker_unavailable", "busy": bool(worker.busy_since)},
+    try:
+        capacity = process_capacity()
+        resource_ok = capacity is None or capacity["available"] >= 8
+        resource_status = "ok" if resource_ok else "process_capacity_exhausted"
+    except SyncBlocked:
+        capacity, resource_ok, resource_status = None, False, "process_capacity_unknown"
+    status = "worker_unavailable" if not ok else resource_status
+    ok = ok and resource_ok
+    return JSONResponse({"status": status, "busy": bool(worker.busy_since), "process_capacity": capacity},
                         status_code=200 if ok else 503)
 
 
