@@ -26,6 +26,14 @@ def zombies():
     return found
 
 
+def process_state(path):
+    try:
+        return path.read_text().rsplit(')',1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        # procfs may report ESRCH as the task disappears, even during stat().
+        return None
+
+
 def check(cycles=100, observe=False):
     before = set(zombies())
     assert os.getpid() != 1 and not before, 'Probe requires a fresh isolated container'
@@ -82,17 +90,14 @@ time.sleep(60)
                 child=int(ready.read_text())
                 child_stat=Path('/proc')/str(child)/'stat'
                 deadline=time.monotonic()+2
-                while child_stat.exists() and time.monotonic()<deadline:
-                    try:
-                        state=child_stat.read_text().rsplit(')',1)[1].split()[0]
-                        if observe and state=='Z':break
-                    except FileNotFoundError:
-                        break
+                while time.monotonic()<deadline:
+                    state=process_state(child_stat)
+                    if state is None or (observe and state=='Z'):break
                     time.sleep(0.01)
                 if observe:
-                    assert child_stat.exists() and child_stat.read_text().rsplit(')',1)[1].split()[0]=='Z', 'Negative control did not retain the orphan'
+                    assert process_state(child_stat)=='Z', 'Negative control did not retain the orphan'
                 else:
-                    assert not child_stat.exists(), f'Fixture child {child} was not reaped'
+                    assert process_state(child_stat) is None, f'Fixture child {child} was not reaped'
                 current=len(zombies());peak_zombies=max(peak_zombies,current)
                 if not observe:assert current==0, f'Unreaped child after cycle {index+1}'
             if not observe:
