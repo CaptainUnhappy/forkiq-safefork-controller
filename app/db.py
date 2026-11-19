@@ -190,6 +190,8 @@ class DB:
             conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_discover','0')")
         if "control_epoch" not in columns:
             conn.execute("ALTER TABLE repositories ADD COLUMN control_epoch INTEGER NOT NULL DEFAULT 0")
+        if "push_intent_json" not in columns:
+            conn.execute("ALTER TABLE repositories ADD COLUMN push_intent_json TEXT")
         for table in ("repositories", "creation_jobs"):
             present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
             for name, kind in (("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("next_retry_at", "REAL NOT NULL DEFAULT 0")):

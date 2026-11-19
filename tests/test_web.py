@@ -85,6 +85,18 @@ class WebTests(unittest.TestCase):
         self.client.post("/setup", data={"password": "other-password-123", "password2": "other-password-123"})
         self.assertEqual(self.db.get_setting("admin_pass_hash"), before)
 
+    def test_verifying_is_visible_and_manual_controls_cancel_authority(self):
+        csrf = self.login(); repo = self.repo()
+        for action in ("pause", "preview", "disconnect"):
+            self.db.run("UPDATE repositories SET enabled=0,review_required=1,status='verifying',push_intent_json='{}',next_retry_at=2000000000")
+            self.assertIn("待核验",self.client.get("/partials/repos?filter=waiting").text)
+            self.assertIn("暂停自动恢复",self.client.get(f"/repos/{repo}").text)
+            path = "/settings/disconnect" if action=="disconnect" else f"/repos/{repo}/{action}"
+            self.client.post(path,data={"csrf":csrf})
+            row=self.db.one("SELECT * FROM repositories")
+            self.assertIsNone(row["push_intent_json"])
+            self.assertEqual((row["enabled"],row["next_retry_at"]),(0,0))
+
     def test_login_throttled_and_cookie_not_javascript_accessible(self):
         self.login()
         self.client.cookies.clear()

@@ -53,6 +53,8 @@ class MemoryStore:
         pass
     def archive_plan(self, config, expected):
         return {"path": "repositories/22.git", "before": self.archived.copy(), "local_only": [], "saved": False}
+    def archive_refs(self, config):
+        return self.archived.copy()
     def preserve(self, config, expected, archive):
         self.archived.update(expected)
         return {**archive, "saved": True, "ref_count": len(self.archived)}
@@ -330,6 +332,50 @@ class RealGitTests(unittest.TestCase):
 
     def store(self):
         return self.Store(self.root, "unused/source", "unused/target")
+
+    def _engine_network_recovery(self, applied):
+        from app.db import DB, insert_repository
+        from app.engine import run_cycle
+        from app.gitstore import PushNetworkError
+        b = self.commit("recoverable change")
+        self.git(self.source, "tag", "-a", "v-recovery", "-m", "annotated")
+        tag = self.git(self.source, "rev-parse", "refs/tags/v-recovery")
+        attempts = []
+        class UncertainStore(self.Store):
+            def refs(self, side):
+                self.ref_readers = {}  # isolated file remotes, no GitHub API
+                return super().refs(side)
+            def push(self, updates, expected):
+                attempts.append(dict(updates))
+                if len(attempts) == 1:
+                    if applied: super().push(updates, expected)
+                    raise PushNetworkError("injected response loss")
+                return super().push(updates, expected)
+        db = DB(self.root / "forkiq.db")
+        self.addCleanup(db.close)
+        cfg = config(); source, target = metadata(cfg)
+        key = insert_repository(db, owner="owner", name="project-SafeFork", full_name=cfg["target"], upstream_full_name=cfg["source"])
+        db.run("UPDATE repositories SET config_json=?,enabled=1,review_required=0", (json.dumps(cfg),))
+        client = Mock();client.get_repo.side_effect=lambda name: source if name==cfg["source"] else target
+        client.actions_enabled.return_value=False;client.has_active_runs.return_value=False
+        with patch("time.time",return_value=1000): run_cycle(db,client,store_type=UncertainStore)
+        self.assertEqual(db.one("SELECT status FROM repositories")["status"],"verifying")
+        db.close()
+        with patch("time.time",return_value=1060): run_cycle(db,client,store_type=UncertainStore,only_requested=True)
+        self.assertEqual(len(attempts),1)  # checking never writes, even when target unchanged
+        if not applied:
+            with patch("time.time",return_value=1060): run_cycle(db,client,store_type=UncertainStore,only_requested=True)
+        self.assertEqual(len(attempts),1 if applied else 2)
+        self.assertEqual(db.one("SELECT status FROM repositories")["status"],"synced")
+        self.assertEqual(self.git(self.target,"rev-parse","main"),b)
+        self.assertEqual(self.git(self.target,"rev-parse","refs/tags/v-recovery"),tag)
+        with self.store() as store: self.assertEqual(store.archive_refs(cfg),store.refs("target"))
+
+    def test_real_remote_applied_push_with_lost_response_is_not_repeated(self):
+        self._engine_network_recovery(True)
+
+    def test_real_remote_unwritten_push_is_replanned_and_saved(self):
+        self._engine_network_recovery(False)
 
     def test_full_history_branches_raw_annotated_tag_and_archive(self):
         b = self.commit("second")

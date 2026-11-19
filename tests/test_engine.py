@@ -266,7 +266,11 @@ class EngineTests(unittest.TestCase):
             self.cycle()
             self.cycle()
             getattr(self.store, stage).assert_called_once()
-            self.assertEqual((self.row(repo)["enabled"], self.row(repo)["next_retry_at"]), (0, 0))
+            self.assertEqual(self.row(repo)["enabled"], 0)
+            if stage == "preserve":
+                self.assertEqual(self.row(repo)["next_retry_at"], 0)
+            else:
+                self.assertEqual(self.row(repo)["status"], "verifying")
 
     def test_pause_disconnect_and_preview_never_gain_retry_authority(self):
         for action in ("pause", "disconnect", "preview"):
@@ -293,6 +297,26 @@ class EngineTests(unittest.TestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_disabled_verifying_intent_wakes_for_read_only_check(self):
+        with tempfile.TemporaryDirectory() as root:
+            worker = Worker(root, str(Path(root) / "unused.pem"))
+            with closing(DB(Path(root) / "forkiq.db")) as db:
+                insert_repository(db, owner="owner", name="project", full_name="owner/project", upstream_full_name="upstream/project")
+                db.run("UPDATE repositories SET enabled=0,review_required=1,status='verifying',push_intent_json='{}',next_retry_at=20")
+                db.set_setting("check_interval", "60")
+            clock, calls = [0], []
+            def wait(seconds):
+                clock[0] += seconds
+                if clock[0] >= 30: worker.stop_flag.set()
+            def cycle(db, client, **kwargs):
+                calls.append((clock[0], kwargs["only_requested"]))
+                if clock[0] == 20: db.run("UPDATE repositories SET next_retry_at=0,push_intent_json=NULL,status='paused'")
+            worker.wake = Mock(wait=wait)
+            with patch("app.engine.time.monotonic", side_effect=lambda: clock[0]), patch("app.engine.time.time", side_effect=lambda: clock[0]), \
+                 patch("app.engine.client_from_settings", return_value=Mock()), patch("app.engine.run_cycle", side_effect=cycle):
+                worker.run()
+            self.assertEqual(calls, [(0, False), (20, True)])
+
     def test_due_retry_wakes_without_postponing_natural_schedule(self):
         with tempfile.TemporaryDirectory() as root:
             worker = Worker(root, str(Path(root) / "unused.pem"))

@@ -61,7 +61,7 @@ app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 db = DB(STATE_DIR / "forkiq.db")
 worker = Worker(STATE_DIR, PEM_PATH)
 _login_failures = {}
-STATUS_GROUPS = {"synced": ("synced",), "waiting": ("pending", "behind", "retrying"),
+STATUS_GROUPS = {"synced": ("synced",), "waiting": ("pending", "behind", "retrying", "verifying"),
                  "attention": ("blocked", "diverged", "needs_attention", "error", "missing"), "paused": ("paused",)}
 
 
@@ -543,9 +543,9 @@ def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""
     if not row:
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
     if action == "pause":
-        db.run("UPDATE repositories SET enabled=0,status='paused',sync_requested=0,retry_count=0,next_retry_at=0,control_epoch=control_epoch+1 WHERE id=?", (repo_id,))
+        db.run("UPDATE repositories SET enabled=0,status='paused',sync_requested=0,retry_count=0,next_retry_at=0,push_intent_json=NULL,control_epoch=control_epoch+1 WHERE id=?", (repo_id,))
     elif action == "preview":
-        db.run("UPDATE repositories SET enabled=0,status='paused',dry_run_requested=1,retry_count=0,next_retry_at=0,control_epoch=control_epoch+1 WHERE id=?", (repo_id,))
+        db.run("UPDATE repositories SET enabled=0,status='paused',dry_run_requested=1,retry_count=0,next_retry_at=0,push_intent_json=NULL,control_epoch=control_epoch+1 WHERE id=?", (repo_id,))
     elif action == "resume":
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(row["last_check_at"])).total_seconds()
@@ -554,7 +554,7 @@ def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""
         if (row["review_required"] or not row["plan_json"] or not 0 <= age <= 600
                 or not hmac.compare_digest(review_token(row["plan_json"]), review)):
             return JSONResponse({"error": "请先完成最新只读预览，在 10 分钟内确认计划。"}, status_code=409)
-        changed = db.run("UPDATE repositories SET enabled=1,status='pending',sync_requested=1,retry_count=0,next_retry_at=0,control_epoch=control_epoch+1 "
+        changed = db.run("UPDATE repositories SET enabled=1,status='pending',sync_requested=1,retry_count=0,next_retry_at=0,push_intent_json=NULL,control_epoch=control_epoch+1 "
                          "WHERE id=? AND control_epoch=? AND plan_json=? AND review_required=0",
                          (repo_id, row["control_epoch"], row["plan_json"]))
         if changed.rowcount != 1:
@@ -611,5 +611,5 @@ def settings_disconnect(request: Request, csrf: str = Form("")):
     if denied:
         return denied
     db.set_setting("github_installation_id", "")
-    db.run("UPDATE repositories SET enabled=0,review_required=1,status='paused',next_retry_at=0,control_epoch=control_epoch+1")
+    db.run("UPDATE repositories SET enabled=0,review_required=1,status='paused',next_retry_at=0,push_intent_json=NULL,control_epoch=control_epoch+1")
     return redirect(request, "/settings?notice=已断开，所有仓库保持暂停")

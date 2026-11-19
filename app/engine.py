@@ -101,6 +101,10 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                 continue
             if only_requested and not (requested or retry_due):
                 continue
+            if row["push_intent_json"] and row["status"] == "verifying":
+                from .reconcile import reconcile
+                reconcile(db, row, client, store_type, cancelled)
+                continue
             dry = bool(row["dry_run_requested"])
             if not dry and (not row["enabled"] or row["review_required"]):
                 continue
@@ -136,6 +140,10 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                                          (utcnow(), row["id"]))
                             intent_saved = True
 
+                def before_push(plan, expected):
+                    from .reconcile import save_intent
+                    save_intent(db, row, connection, plan, expected, cancelled)
+
                 source_token = (source.installation_token if config["mode"] == "standalone-private" else lambda: "")
                 with store_type(root, config["source"], config["target"], source_token,
                                 client.installation_token) as store:
@@ -144,7 +152,8 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                         "target": lambda: client.refs(config["target"], config["target_id"], config["mode"] == "standalone-private")}
                     baseline = db.one("SELECT refs_json FROM sync_baselines WHERE repo_id=?", (row["id"],))
                     plan = synchronize(config, store, guard, dry_run=dry, before_write=before_write,
-                                       managed_refs=json.loads(baseline["refs_json"]) if baseline else None)
+                                       managed_refs=json.loads(baseline["refs_json"]) if baseline else None,
+                                       before_push=before_push)
                 primary = "refs/heads/" + config["primary"]
                 dest = "refs/heads/" + config["branch_map"].get(config["primary"], config["primary"])
                 target_refs = plan["target"] if dry else {**plan["target"], **plan["updates"]}
@@ -155,7 +164,7 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                 plan["checked_at"] = stamp
                 with db.transaction() as conn:
                     changed = conn.execute("UPDATE repositories SET plan_json=?,fork_sha=?,upstream_sha=?,last_check_at=?,"
-                       "last_success_at=?,last_error=NULL,review_required=0,enabled=?,status=?,updated_at=?,retry_count=0,next_retry_at=0 "
+                       "last_success_at=?,last_error=NULL,review_required=0,enabled=?,status=?,updated_at=?,retry_count=0,next_retry_at=0,push_intent_json=NULL "
                        "WHERE id=? AND control_epoch=? AND config_json=?",
                        (json.dumps(plan, sort_keys=True), target_refs.get(dest), plan["source"].get(primary), stamp,
                         row["last_success_at"] if dry else stamp, enabled, "synced" if enabled else "paused", stamp,
@@ -168,6 +177,10 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                               f"清理 {len(plan.get('deletes', {}))} 个过期分支，保留 {len(plan['target_only'])} 个目标独有引用。")
             except Exception as error:
                 message = str(error) if isinstance(error, SyncBlocked) else "检查或连接失败；已停写，请核对凭据、网络与仓库状态后预览。"
+                if intent_saved:
+                    from .reconcile import queue_check
+                    if queue_check(db, row, connection, error, cancelled):
+                        continue
                 if isinstance(error, RemoteReadUnavailable) and not dry and not intent_saved and not cancelled():
                     count = row["retry_count"]
                     with db.transaction() as conn:
@@ -184,7 +197,7 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                                 continue
                     message = str(error) + " 自动重试已耗尽或同步授权已变化，已暂停；请预览核对后恢复。"
                 db.run("UPDATE repositories SET enabled=0,review_required=1,status='needs_attention',"
-                       "next_retry_at=0,plan_json=NULL,last_error=?,last_check_at=?,updated_at=? WHERE id=? AND control_epoch=?",
+                       "next_retry_at=0,push_intent_json=NULL,plan_json=NULL,last_error=?,last_check_at=?,updated_at=? WHERE id=? AND control_epoch=?",
                        (message, utcnow(), utcnow(), row["id"], row["control_epoch"]))
                 log_event(db, row["id"], "blocked", message)
 
@@ -207,7 +220,9 @@ class Worker(threading.Thread):
             while not self.stop_flag.is_set():
                 self.last_tick = time.monotonic()
                 requested = db.one("SELECT id FROM repositories WHERE dry_run_requested=1 OR sync_requested=1 LIMIT 1")
-                retrying = db.one("SELECT id FROM repositories WHERE enabled=1 AND review_required=0 AND next_retry_at>0 AND next_retry_at<=? LIMIT 1", (time.time(),))
+                retrying = db.one("SELECT id FROM repositories WHERE ((enabled=1 AND review_required=0) OR "
+                                 "(status='verifying' AND enabled=0 AND review_required=1 AND push_intent_json IS NOT NULL)) "
+                                 "AND next_retry_at>0 AND next_retry_at<=? LIMIT 1", (time.time(),))
                 creating = db.one("SELECT id FROM creation_jobs WHERE status IN ('queued','working') OR (status='retrying' AND next_retry_at<=?) LIMIT 1", (time.time(),))
                 scheduled = time.monotonic() >= due
                 if requested or scheduled or creating or retrying:

@@ -27,6 +27,34 @@ class RemoteReadUnavailable(SyncBlocked):
     """Bounded read attempts exhausted; the caller must check its write intent."""
 
 
+class PushNetworkError(SyncBlocked):
+    """Uncertain network write result; only a durable full-ref reconciliation may recover."""
+
+
+def git_error_category(stderr):
+    """Return an allowlisted label, never stderr (which may contain credentials)."""
+    value = stderr.lower()
+    categories = (
+        ("certificate", ("certificate", "ssl peer certificate", "public key does not match")),
+        ("permission", ("authentication", "permission denied", "access denied", "not found", "refusing to allow", "resource not accessible")),
+        ("ref_conflict", ("non-fast-forward", "stale info", "clobber", "cannot lock ref", "remote ref changed")),
+        ("rules", ("protected branch", "repository rule", "pre-receive hook declined", "gh006", "gh013")),
+        ("resource", LOCAL_FAILURES),
+    )
+    for label, markers in categories:
+        if any(marker in value for marker in markers):
+            return label
+    if re.search(r"(?:error:|response|http)[ :]+4\d\d\b", value):
+        return "http_client"
+    if any(marker in value for marker in (
+            "could not resolve", "failed to connect", "connection reset", "connection timed out",
+            "connection refused", "operation timed out", "tls connection was non-properly terminated",
+            "ssl_connect", "unexpected disconnect", "remote end hung up", "empty reply",
+            "http/2 stream", "curl 92", "curl 56", "curl 28")) or re.search(r"(?:error:|response|http)[ :]+50[234]\b", value):
+        return "network"
+    return "unknown"
+
+
 class MirrorUnavailable(SyncBlocked):
     """Optional anonymous mirror rejected the read; use official transport."""
 
@@ -209,6 +237,8 @@ class GitStore:
                 if args[0] == "fetch" and side and not local:
                     # A full 30-minute transfer is not immediately repeated three times.
                     raise RemoteReadUnavailable("Git 只读拉取超时，本轮读取未完成。") from None
+                if operation == "push" and side == "target":
+                    raise PushNetworkError("目标推送超时（network）；结果须完整回读核验。") from None
                 message = "Git 操作超时；若已推送，须核对远端结果后再恢复。"
                 raise SyncBlocked(message) from None
             if code not in allowed:
@@ -222,8 +252,11 @@ class GitStore:
                 if code > 0 and operation in ("ls-remote", "fetch") and side and not local and transient_read_error(failure):
                     raise TransientGitRead("Git 远端读取未完成，正在有限重试。")
                 stage = {"source": "来源", "target": "目标"}.get(side, "本地")
+                category = git_error_category(failure)
+                if operation == "push" and side == "target" and category == "network":
+                    raise PushNetworkError("目标推送连接中断（network，退出码 " + str(code) + "）；结果须完整回读核验。")
                 raise SyncBlocked("Git 操作失败（" + stage + " " + operation + "，退出码 " + str(code)
-                                  + "），请检查权限、引用与磁盘；不会强推。")
+                                  + "，类别 " + category + "），已停写；不会强推。")
             output.seek(0)
             data = output.read(16 * 1024 * 1024 + 1)
             if len(data) > 16 * 1024 * 1024:

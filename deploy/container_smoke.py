@@ -75,7 +75,7 @@ def check(image, memory_mib=128, report=None):
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_safefork.py")
         docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", "test_creation.py")
-        for suite in ("test_engine.py", "test_network.py", "test_resources.py"):
+        for suite in ("test_engine.py", "test_network.py", "test_resources.py", "test_reconcile.py"):
             docker("exec", "-e", "TMPDIR=/var/lib/forkiq/smoke-tmp", "-e", "PYTHONPATH=/opt/forkiq:/opt/controller-tests",
                    container, "python", "-m", "unittest", "discover", "-s", "/opt/controller-tests", "-p", suite)
         reaping = json.loads(docker("exec", "-e", "PYTHONPATH=/opt/forkiq", container,

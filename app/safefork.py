@@ -161,7 +161,8 @@ def make_plan(config, source, target, store, managed_refs=None):
             "target_only": sorted(set(target) - destinations - set(deletes)), "source": source, "target": target}
 
 
-def synchronize(config, store, verify_identity, *, dry_run=True, before_write=lambda: None, managed_refs=None):
+def synchronize(config, store, verify_identity, *, dry_run=True, before_write=lambda: None, managed_refs=None,
+                before_push=lambda plan, expected: None):
     """verify_identity must enforce live IDs, visibility and disabled/quiescent Actions."""
     validate_config(config)
     verify_identity()
@@ -187,6 +188,8 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     if store.refs("source") != source or store.refs("target") != target:
         raise SyncBlocked("写入前引用变化，未写入。")
     before_write()
+    if plan["updates"] or plan["deletes"]:
+        before_push(plan, {k: v for k, v in expected.items() if k not in plan["deletes"]})
     if plan["deletes"]:
         store.push(plan["updates"], target, deletes=plan["deletes"])
     elif plan["updates"]:

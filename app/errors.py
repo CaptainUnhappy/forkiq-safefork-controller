@@ -5,6 +5,9 @@ import re
 def error_guidance(message):
     """Explain known failures, including historical GitHub payloads, without guessing."""
     text = (message or "").lower()
+    if "只读结果核验" in text or "只读推送结果核验" in text:
+        return {"summary": "正在核对上次推送的完整结果，暂不重复推送。",
+                "action": "已完成的更新会直接确认；只有确认目标完全未变且为网络错误时，才重新规划并有限重试。可暂停取消自动恢复。"}
     if "运行资源不足" in text:
         return {"summary": "服务器运行资源不足，本次同步已暂停。",
                 "action": "请检查容器进程回收、进程上限和内存。处理后先做只读预览，再恢复同步；不会自动重复推送。"}
