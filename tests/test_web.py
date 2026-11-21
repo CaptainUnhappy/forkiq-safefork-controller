@@ -63,6 +63,15 @@ class WebTests(unittest.TestCase):
         self.assertEqual((response.status_code, response.headers["location"]), (302, "/setup"))
         self.assertEqual(self.client.get("/partials/repos").status_code, 401)
 
+    def test_public_backup_mode_is_explicit_and_not_labeled_private(self):
+        self.login()
+        self.assertIn('value="standalone-public"', self.client.get("/repos").text)
+        key = self.repo()
+        self.db.run("UPDATE repositories SET config_json=? WHERE id=?", (json.dumps(config(mode="standalone-public")), key))
+        text = self.client.get(f"/repos/{key}").text
+        self.assertIn("独立公开备份", text)
+        self.assertNotIn("经授权独立私有备份", text)
+
     def test_retry_status_time_and_pause_cancellation_are_visible(self):
         csrf = self.login()
         repo = self.repo()

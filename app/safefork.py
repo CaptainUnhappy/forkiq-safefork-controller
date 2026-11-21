@@ -36,7 +36,7 @@ def validate_config(config):
             raise SyncBlocked("缺少已核实的仓库 ID。")
     if config["source_id"] == config["target_id"]:
         raise SyncBlocked("来源与目标 ID 不能相同。")
-    if config.get("mode") not in ("public-fork", "standalone-private"):
+    if config.get("mode") not in ("public-fork", "standalone-public", "standalone-private"):
         raise SyncBlocked("不支持的存储模式。")
     if type(config.get("prune_deleted_branches", False)) is not bool:
         raise SyncBlocked("分支清理策略无效。")
@@ -83,6 +83,9 @@ def validate_identity(config, source, target):
     if private:
         if target.get("fork") is not False or target.get("parent"):
             raise SyncBlocked("私有目标必须是独立私有仓库，不能是原生 Fork。")
+    elif config["mode"] == "standalone-public":
+        if target.get("fork") is not False or target.get("parent") or target.get("source"):
+            raise SyncBlocked("独立公开目标不能属于 Fork 网络；不会转换或接管已有 Fork。")
     else:
         parent = target.get("parent") or {}
         if (target.get("fork") is not True or parent.get("id") != config["source_id"]
@@ -166,7 +169,7 @@ def synchronize(config, store, verify_identity, *, dry_run=True, before_write=la
     """verify_identity must enforce live IDs, visibility and disabled/quiescent Actions."""
     validate_config(config)
     verify_identity()
-    store.public_source = config["mode"] == "public-fork"
+    store.public_source = config["mode"] in ("public-fork", "standalone-public")
     store.seed_archive(config)
     source, target = store.refs("source"), store.refs("target")
     store.fetch("source", source)

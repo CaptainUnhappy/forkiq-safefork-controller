@@ -35,8 +35,10 @@ def parse_repo(value):
 
 
 def source_client(config, target_client):
-    if config["mode"] == "public-fork":
+    if config["mode"] in ("public-fork", "standalone-public"):
         return target_client
+    if config["mode"] != "standalone-private":
+        raise SyncBlocked("不支持的存储模式。")
     name = config.get("source_secret", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
         raise SyncBlocked("来源凭据名称无效。")
@@ -58,7 +60,7 @@ def source_client(config, target_client):
 def register(db, client, source, target, mode, branch_map, preserved_tags,
              authorized=False, source_secret=""):
     source, target = parse_repo(source), parse_repo(target)
-    if mode not in ("public-fork", "standalone-private"):
+    if mode not in ("public-fork", "standalone-public", "standalone-private"):
         raise SyncBlocked("不支持的存储模式。")
     if mode == "standalone-private" and authorized is not True:
         raise SyncBlocked("私有备份需先取得独立复制与留存授权。")

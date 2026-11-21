@@ -402,6 +402,31 @@ class RealGitTests(unittest.TestCase):
             synchronize(config(), store, lambda: None)
             self.assertEqual(store.refs("target"), before)
 
+    def test_standalone_public_empty_target_archive_and_rewind_protection(self):
+        cfg = config(mode="standalone-public")
+        self.git(self.target, "update-ref", "-d", MAIN)
+        b = self.commit("independent public backup")
+        self.git(self.source, "branch", "feature", b)
+        self.git(self.source, "tag", "-a", "v-public", "-m", "original annotated tag")
+        tag = self.git(self.source, "rev-parse", "refs/tags/v-public")
+        expected = {MAIN: b, "refs/heads/feature": b, "refs/tags/v-public": tag}
+        with self.store() as store:
+            plan = synchronize(cfg, store, lambda: None, dry_run=True)
+            self.assertEqual(plan["updates"], expected)
+            self.assertEqual(store.refs("target"), {})
+            self.assertFalse(store.archive_path(cfg).exists())
+            synchronize(cfg, store, lambda: None, dry_run=False)
+            self.assertEqual(store.refs("target"), expected)
+            self.assertEqual(store.archive_refs(cfg), expected)
+            with self.assertRaisesRegex(SyncBlocked, "身份"):
+                store.archive_refs(config())
+        self.assertEqual(self.git(self.target, "rev-list", "--count", "main"), "2")
+        self.git(self.source, "update-ref", MAIN, self.a)
+        with self.store() as store:
+            with self.assertRaises(SyncBlocked): synchronize(cfg, store, lambda: None, dry_run=False)
+            self.assertEqual(store.refs("target"), expected)
+            self.assertEqual(store.archive_refs(cfg), expected)
+
     def test_workflow_files_preserve_git_objects_without_execution(self):
         workflow = self.source / ".github" / "workflows" / "fixture.yml"
         workflow.parent.mkdir(parents=True)
