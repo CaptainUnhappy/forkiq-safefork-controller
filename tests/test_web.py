@@ -72,6 +72,39 @@ class WebTests(unittest.TestCase):
         self.assertIn("独立公开备份", text)
         self.assertNotIn("经授权独立私有备份", text)
 
+    def test_protection_warning_is_consistent_across_list_detail_and_events(self):
+        self.login()
+        key = self.repo()
+        message = "不是快进：refs/heads/main；保留目标历史，未写入任何引用。"
+        self.db.run("UPDATE repositories SET mode='safefork',status='needs_attention',last_error=? WHERE id=?", (message, key))
+        self.db.run("INSERT INTO events(repo_id,at,kind,message) VALUES(?,?,'blocked',?)", (key, utcnow(), message))
+        before = dict(self.db.one("SELECT * FROM repositories WHERE id=?", (key,)))
+        for path in ("/repos", "/partials/repos", f"/repos/{key}"):
+            page = self.client.get(path).text
+            self.assertIn('class="badge s-warning"', page)
+            self.assertIn("历史保护", page)
+            self.assertNotIn('class="badge s-needs_attention"', page)
+        page = self.client.get("/repos").text
+        self.assertIn('class="verdict v-warning"', page)
+        self.assertIn('data-error-status="历史保护"', page)
+        for path in ("/", "/partials/overview", f"/repos/{key}"):
+            self.assertIn('class="badge kind-warning"', self.client.get(path).text)
+        self.assertEqual(dict(self.db.one("SELECT * FROM repositories WHERE id=?", (key,))), before)
+        self.assertEqual(self.db.one("SELECT message FROM events")["message"], message)
+
+    def test_operational_failure_stays_red_and_inaccessible_is_not_called_deleted(self):
+        self.login()
+        key = self.repo()
+        self.db.run("UPDATE repositories SET status='needs_attention',last_error='连接失败' WHERE id=?", (key,))
+        page = self.client.get("/repos").text
+        self.assertIn('class="badge s-needs_attention"', page)
+        self.assertNotIn('class="badge s-warning"', page)
+        self.db.run("UPDATE repositories SET upstream_gone=1 WHERE id=?", (key,))
+        page = self.client.get("/repos").text
+        self.assertIn('class="badge s-warning"', page)
+        self.assertIn("上游不可用", page)
+        self.assertNotIn("上游已删除", page)
+
     def test_retry_status_time_and_pause_cancellation_are_visible(self):
         csrf = self.login()
         repo = self.repo()

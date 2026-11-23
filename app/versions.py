@@ -11,6 +11,7 @@ commits upstream does not (its own Actions or local work) while every upstream
 commit is already inside it, so nothing needs syncing; "落后上游" means upstream
 has commits the fork lacks.
 """
+from .errors import protection_notice
 
 
 def _count(repo, key):
@@ -44,6 +45,13 @@ def version_verdict(repo):
     """
     fork = repo["fork_sha"] or ""
     upstream = repo["upstream_sha"] or ""
+    if repo["upstream_gone"]:
+        return {"kind": "gone", "text": "上游不可用", "sha": "",
+                "title": "上游仓库已不可见；fork 与本地历史保留，未做任何改动"}
+    notice = protection_notice(_field(repo, "last_error"))
+    if notice and repo["status"] in ("diverged", "blocked", "needs_attention", "missing", "error"):
+        return {"kind": "warning", "text": notice["label"], "sha": "",
+                "title": notice["summary"] + notice["action"]}
     if _field(repo, "mode") == "safefork":
         if repo["status"] == "synced":
             return {"kind": "same", "text": "引用已核对", "sha": upstream,
@@ -54,9 +62,6 @@ def version_verdict(repo):
     status = repo["status"]
     upstream_ahead = _count(repo, "upstream_ahead")
     fork_ahead = _count(repo, "fork_ahead")
-    if repo["upstream_gone"]:
-        return {"kind": "gone", "text": "上游不可用", "sha": "",
-                "title": "上游仓库已不可见；fork 与本地历史保留，未做任何改动"}
     if not fork or not upstream:
         return {"kind": "pending", "text": "待检查", "sha": "",
                 "title": "尚未记录版本号，等待下一次检查"}
@@ -105,7 +110,7 @@ def version_verdict(repo):
 
 def fork_tone(verdict):
     """Colour for the local SHA: neutral until the fork is known to lag."""
-    return {"behind": "sha-behind", "unsynced": "sha-unsynced",
+    return {"behind": "sha-behind", "warning": "sha-warning", "unsynced": "sha-unsynced",
             "diverged": "sha-unsynced"}.get(verdict["kind"], "")
 
 

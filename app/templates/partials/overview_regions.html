@@ -20,7 +20,7 @@
   <div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events" data-columns="4">
     <tr><th>时间</th><th>类型</th><th>仓库</th><th>说明</th></tr>
     {% for e in events %}
-    <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td>
+    <tr><td class="muted">{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind, e.message) }}</td>
         <td>{{ repo_link(e.full_name) }}</td><td>{{ error_message(e.message) if e.kind in ('error', 'blocked', 'auth') else e.message }}</td></tr>
     {% endfor %}
   </table></div>

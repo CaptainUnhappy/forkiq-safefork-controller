@@ -20,6 +20,18 @@ def repo(**overrides):
 
 
 class VersionVerdictTests(unittest.TestCase):
+    def test_protective_stop_is_warning_not_synced_or_system_error(self):
+        for mode in ("safefork", "legacy"):
+            row = repo(mode=mode, status="needs_attention", fork_sha=UPSTREAM,
+                       last_error="不是快进：refs/heads/other；保留目标历史，未写入任何引用。")
+            verdict = version_verdict(row)
+            self.assertEqual(verdict["kind"], "warning")
+            self.assertEqual(verdict["text"], "历史保护")
+            self.assertEqual(annotate([row])[0]["fork_tone"], "sha-warning")
+        self.assertEqual(version_verdict(repo(mode="safefork", upstream_gone=1))["kind"], "gone")
+        self.assertEqual(version_verdict(repo(mode="safefork", status="needs_attention",
+                                             last_error="连接失败"))["kind"], "unsynced")
+
     def test_same_commit_is_reported_as_identical(self):
         verdict = version_verdict(repo(fork_sha=UPSTREAM))
         self.assertEqual(verdict["kind"], "same")

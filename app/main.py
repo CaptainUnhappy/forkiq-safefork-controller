@@ -18,7 +18,7 @@ from .db import DB, log_event, utcnow
 from .engine import Worker, app_client_from_settings, client_from_settings, register
 from .github import exchange_manifest, write_pem, AuthError, RateLimited
 from .gitstore import SyncBlocked, process_capacity
-from .errors import error_guidance
+from .errors import error_guidance, protection_notice
 from .versions import annotate, short_time
 from .oauth import OAuthStore
 from . import oauth, provision
@@ -55,6 +55,7 @@ app = FastAPI(title="ForkIQ SafeFork", root_path=ROOT_PATH, docs_url=None, redoc
 templates = Jinja2Templates(directory=BASE / "templates")
 templates.env.filters["short_time"] = short_time
 templates.env.filters["error_guidance"] = error_guidance
+templates.env.filters["protection_notice"] = protection_notice
 templates.env.filters["retry_time"] = lambda value: datetime.fromtimestamp(value, timezone.utc).isoformat(timespec="seconds") if value else ""
 ASSET_VERSION = hashlib.sha256((BASE / "static/app.css").read_bytes() +
                                (BASE / "static/app.js").read_bytes()).hexdigest()[:10]

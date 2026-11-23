@@ -10,16 +10,16 @@
         子项按列优先填充，顺序（本地名称 / 本地版本 / 上游名称 / 上游版本）
         就是网格的契约，不要插入额外子项。 -#}
     <td colspan="2"><div class="repo-pair">
-      <div class="pair-name pair-local"><span class="sr-only">fork 仓库：</span><a href="{{ base_path }}/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</div>
+      <div class="pair-name pair-local"><span class="sr-only">fork 仓库：</span><a href="{{ base_path }}/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.upstream_gone %}<span class="tag tag-warn">上游不可用</span>{% endif %}</div>
       <div class="version-line pair-local">{{ version_chip(r.fork_sha, r.fork_tag, r.fork_commit_at, side='本地', tone=r.fork_tone) }}</div>
       <div class="pair-name pair-upstream muted"><span class="sr-only">上游仓库：</span>{{ repo_link(r.upstream_full_name) }}</div>
       <div class="version-line pair-upstream">{{ version_chip(r.upstream_sha, r.upstream_tag, r.upstream_commit_at, side='上游') }}</div>
     </div></td>
     <td data-label="版本对比">{{ verdict_chip(r.verdict) }}</td>
-    <td data-label="状态">{{ status(r.status) }}
+    <td data-label="状态">{{ status(r.status, r.last_error, r.upstream_gone) }}
         {% if r.next_retry_at and r.enabled %}<div class="muted">第 {{ r.retry_count }}/5 次重试：{{ timestamp(r.next_retry_at | retry_time) }}</div>{% endif %}
         {% if r.status == 'verifying' %}<div class="muted">只读核验：{{ timestamp(r.next_retry_at | retry_time) }}</div>{% endif %}
-        {% if r.last_error %}{% set guidance = r.last_error | error_guidance %}<a class="error-details" href="{{ base_path }}/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}" data-error-summary="{{ guidance.summary if guidance else '' }}" data-error-action="{{ guidance.action if guidance else '' }}">查看详情</a>{% endif %}</td>
+        {% if r.last_error %}{% set guidance = r.last_error | error_guidance %}<a class="error-details" href="{{ base_path }}/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status, r.last_error, r.upstream_gone) }}" data-error-message="{{ r.last_error }}" data-error-summary="{{ guidance.summary if guidance else '' }}" data-error-action="{{ guidance.action if guidance else '' }}">查看详情</a>{% endif %}</td>
     <td class="muted" data-label="最近检查">{{ timestamp(r.last_check_at) }}</td>
     <td class="repo-controls">
       <form method="post" action="{{ base_path }}/repos/{{ r.id }}/{{ 'pause' if (r.enabled and r.status != 'paused') or r.status == 'verifying' else 'resume' }}">

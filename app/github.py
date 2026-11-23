@@ -22,7 +22,9 @@ REFS_QUERY = """query SafeForkRefs($owner:String!, $name:String!, $prefix:String
 
 
 class AuthError(RuntimeError):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class RateLimited(RuntimeError):
@@ -106,7 +108,7 @@ class GitHub:
         if status == 429 or (status == 403 and headers.get("X-RateLimit-Remaining") == "0"):
             raise RateLimited("GitHub 限流，已停写。")
         if status in (401, 403, 404):
-            raise AuthError(f"GitHub 无法读取已登记仓库或权限（HTTP {status}）；不会改用其他来源。")
+            raise AuthError(f"GitHub 无法读取已登记仓库或权限（HTTP {status}）；不会改用其他来源。", status=status)
         if status != 200 or not isinstance(payload, (dict, list)):
             raise RuntimeError(f"GitHub 读取失败（HTTP {status}）。")
         return payload

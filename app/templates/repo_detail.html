@@ -3,7 +3,7 @@
 {% set active_page = "repos" %}
 {% block title %}ForkIQ · SafeFork{% endblock %}
 {% block page_title %}{{ repo.full_name }}{% endblock %}
-{% block header_actions %}{{ status(repo.status) }}{% endblock %}
+{% block header_actions %}{{ status(repo.status, repo.last_error, repo.upstream_gone) }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ base_path }}/repos">返回仓库列表</a>
 {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
@@ -54,6 +54,6 @@
 </section>
 {% endif %}
 <section class="card"><h2>事件记录</h2>
-  {% if events %}<div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events"><tr><th>时间</th><th>类型</th><th>结果</th></tr>{% for e in events %}<tr><td>{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind) }}</td><td>{{ e.message }}</td></tr>{% endfor %}</table></div>{% else %}<p>暂无事件。</p>{% endif %}
+  {% if events %}<div class="table-wrap" role="region" aria-label="事件记录" tabindex="0"><table class="events"><tr><th>时间</th><th>类型</th><th>结果</th></tr>{% for e in events %}<tr><td>{{ timestamp(e.at) }}</td><td>{{ event_kind(e.kind, e.message) }}</td><td>{{ e.message }}</td></tr>{% endfor %}</table></div>{% else %}<p>暂无事件。</p>{% endif %}
 </section>
 {% endblock %}

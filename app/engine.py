@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 from .db import DB, insert_repository, log_event, utcnow
-from .github import GitHub
+from .github import AuthError, GitHub
 from .gitstore import GitStore, SyncBlocked, RemoteReadUnavailable, process_lock
 from .safefork import repo_name, synchronize, validate_config, validate_identity
 
@@ -83,7 +83,13 @@ def register(db, client, source, target, mode, branch_map, preserved_tags,
 
 
 def verify_live(config, source, target):
-    validate_identity(config, source.get_repo(config["source"]), target.get_repo(config["target"]))
+    try:
+        source_meta = source.get_repo(config["source"])
+    except AuthError as error:
+        if error.status == 404:
+            raise SyncBlocked("上游仓库不可访问（HTTP 404）；可能已删除、转为私有或授权变化，已保留现有历史并停写。") from None
+        raise
+    validate_identity(config, source_meta, target.get_repo(config["target"]))
     if target.actions_enabled(config["target"]):
         raise SyncBlocked("目标 Actions 仍启用；请先在 GitHub 全局关闭，控制器不会替你启用或关闭。")
     if target.has_active_runs(config["target"]):

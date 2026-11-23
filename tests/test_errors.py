@@ -1,10 +1,34 @@
 """Known failures get actionable copy without changing the original evidence."""
 import unittest
 
-from app.errors import error_guidance
+from app.errors import error_guidance, protection_notice
 
 
 class ErrorGuidanceTests(unittest.TestCase):
+    def test_history_and_source_guards_are_warnings(self):
+        for message in ("不是快进：refs/heads/main；保留目标历史，未写入任何引用。",
+                        "服务器已有历史不能后退或移动标签：refs/heads/main",
+                        "标签冲突：refs/tags/v1；不会移动已有标签。",
+                        "公开目标的 Fork 来源变化；不会选择替代上游。",
+                        "源主分支不存在，停止同步。",
+                        "异常删除：refs/heads/main；需要单独审查，不自动放行。",
+                        "上游仓库不可访问（HTTP 404）；已停止同步。"):
+            with self.subTest(message=message):
+                notice = protection_notice(message)
+                self.assertTrue(notice["label"])
+                self.assertEqual(error_guidance(message), notice)
+                self.assertIn("保留", notice["action"])
+
+    def test_unknown_failures_and_target_auth_are_not_protection_warnings(self):
+        for message in (None, "", "检查或连接失败；已停写，请核对凭据、网络与仓库状态后预览。",
+                        "GitHub 无法读取已登记仓库或权限（HTTP 404）；不会改用其他来源。",
+                        "GitHub HTTP 401", "可用磁盘不足 1 GiB，已停止；请先调整容量。",
+                        "目标 Actions 仍启用；请先在 GitHub 全局关闭，控制器不会替你启用或关闭。",
+                        "unknown failure: 不是快进：refs/heads/main"):
+            with self.subTest(message=message):
+                self.assertIsNone(protection_notice(message))
+        self.assertIn("不能确定", protection_notice("上游仓库不可访问（HTTP 404）；已停止同步。")["summary"])
+
     def test_historical_payload_and_typed_object_error_share_an_explanation(self):
         old = "强制对齐失败：{'message': 'Object does not exist', 'status': '422'}"
         new = "GitHub HTTP 422: Object does not exist"

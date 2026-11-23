@@ -149,7 +149,7 @@ tr:hover td { background: var(--surface); }
 .version-chip > span { white-space: nowrap; }
 .version-chip .version-side { padding: 0 5px; border-radius: 4px; background: var(--surface); color: var(--muted); font-size: 10px; }
 .version-chip .sha { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
-.version-chip .sha-behind { color: var(--amber); }
+.version-chip .sha-behind, .version-chip .sha-warning { color: var(--amber); }
 .version-chip .sha-unsynced { color: var(--red); }
 .version-chip .tag-version { margin-left: 0; padding: 0; color: var(--primary); border: 0; background: none; font-weight: 500; }
 .version-chip .tag-version.tag-missing { color: var(--muted); font-weight: 400; }
@@ -161,15 +161,15 @@ tr:hover td { background: var(--surface); }
 .verdict > span { white-space: nowrap; }
 .verdict .verdict-sha { font-size: 11px; font-variant-numeric: tabular-nums; }
 .v-same, .v-contains { background: var(--primary-soft); color: var(--green); }
-.v-behind { background: var(--warning-soft); color: var(--amber); }
-.v-unsynced, .v-gone, .v-diverged { background: var(--danger-soft); color: var(--red); }
+.v-behind, .v-warning, .v-gone { background: var(--warning-soft); color: var(--amber); }
+.v-unsynced, .v-diverged { background: var(--danger-soft); color: var(--red); }
 .v-pending { background: var(--surface); color: var(--muted); }
 .repos td:nth-child(2) .verdict { display: flex; width: fit-content; }
 .badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 5px; font-size: 11px; line-height: 1.5; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--muted); }
 .s-synced, .kind-synced, .kind-merge { background: var(--primary-soft); color: var(--green); }
 .s-behind, .s-pending, .kind-discover { background: var(--primary-soft); color: var(--primary); }
 .s-diverged, .s-blocked, .s-error, .s-needs_attention, .s-missing, .kind-blocked, .kind-error { background: var(--danger-soft); color: var(--red); }
-.kind-auth { background: var(--warning-soft); color: var(--amber); }
+.kind-auth, .kind-warning, .s-warning { background: var(--warning-soft); color: var(--amber); }
 .tag { display: inline-block; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; font-size: 10px; font-weight: 400; white-space: nowrap; }
 .tag-warn { color: var(--amber); border-color: var(--amber); background: var(--warning-soft); }
 .ext-link { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 6px; padding: 3px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--card); }

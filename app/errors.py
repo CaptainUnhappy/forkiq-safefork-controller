@@ -2,8 +2,32 @@
 import re
 
 
+def protection_notice(message):
+    """Classify known upstream safety guards, never generic failures or raw HTTP payloads."""
+    text = (message or "").strip()
+    if text.startswith(("不是快进：", "服务器已有历史不能后退或移动标签：", "标签冲突：")):
+        return {"label": "历史保护", "summary": "上游与已保存历史不兼容，同步已安全停止。",
+                "action": "可能是上游回退、分叉、移动标签，或目标含独有历史。现有历史保留；请核对差异后再决定如何跟踪，不会自动覆盖。"}
+    if text.startswith("上游仓库不可访问（HTTP 404）"):
+        return {"label": "上游不可用", "summary": "上游当前不可访问；仅凭 HTTP 404 不能确定已删除，也可能转为私有或授权变化。",
+                "action": "现有仓库和服务器历史保留，写入已停止。请核对原上游及读取权限，不会自动切换来源。"}
+    if text.startswith(("公开目标的 Fork 来源变化；", "源默认分支变化，")):
+        return {"label": "来源变化", "summary": "上游来源关系或默认分支变化，同步已安全停止。",
+                "action": "原来源配置和现有历史保留。请核对仓库身份；不会自动改用新的上游或默认分支。"}
+    if text.startswith("源主分支不存在，"):
+        return {"label": "上游分支缺失", "summary": "已登记的上游主分支不可用，同步已安全停止。",
+                "action": "现有历史保留。请确认原分支是否删除或改名，不会自动选择替代分支。"}
+    if text.startswith(("异常删除：", "目标文件树为空：")):
+        return {"label": "删除保护", "summary": "上游变更包含大量删除或空文件树，已触发保护。",
+                "action": "现有历史保留，未自动放行删除。请先核对上游改动及完整引用计划。"}
+    return None
+
+
 def error_guidance(message):
     """Explain known failures, including historical GitHub payloads, without guessing."""
+    notice = protection_notice(message)
+    if notice:
+        return notice
     text = (message or "").lower()
     if "只读结果核验" in text or "只读推送结果核验" in text:
         return {"summary": "正在核对上次推送的完整结果，暂不重复推送。",

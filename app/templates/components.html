@@ -2,22 +2,25 @@
 <svg class="icon {{ class_name }}" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="{{ base_path }}/static/icons.svg#{{ name }}"></use></svg>
 {%- endmacro %}
 
-{% macro status_label(value) -%}
+{% macro status_label(value, message='', gone=false) -%}
+{% set warning = (message | protection_notice) if value in ('diverged', 'blocked', 'needs_attention', 'missing', 'error') else none -%}
 {% set labels = {'synced': '已同步', 'behind': '待同步', 'pending': '等待检查', 'retrying': '等待重试', 'verifying': '待核验', 'diverged': '存在分叉', 'blocked': '同步阻塞', 'error': '检查失败', 'needs_attention': '需要处理', 'paused': '已暂停', 'missing': '仓库缺失'} -%}
-{{ labels.get(value, value) }}
+{{ '上游不可用' if gone else warning.label if warning else labels.get(value, value) }}
 {%- endmacro %}
 
 {% macro timestamp(value) -%}
 {% if value %}<time class="ts" datetime="{{ value }}" title="{{ value }}">{{ value | short_time }}</time>{% else %}—{% endif %}
 {%- endmacro %}
 
-{% macro status(value) -%}
-<span class="badge s-{{ value }}" title="{{ value }}">{{ status_label(value) }}</span>
+{% macro status(value, message='', gone=false) -%}
+{% set warning = (message | protection_notice) if value in ('diverged', 'blocked', 'needs_attention', 'missing', 'error') else none -%}
+<span class="badge s-{{ 'warning' if warning or gone else value }}" title="{{ value }}">{{ status_label(value, message, gone) }}</span>
 {%- endmacro %}
 
-{% macro event_kind(value) -%}
+{% macro event_kind(value, message='') -%}
+{% set warning = (message | protection_notice) if value in ('blocked', 'error') else none -%}
 {% set labels = {'synced': '同步完成', 'retry': '已安排重试', 'discover': '发现仓库', 'blocked': '同步阻塞', 'error': '错误', 'auth': '认证', 'check': '检查', 'merge': '合并', 'selfupdate': '自更新'} %}
-<span class="badge kind-{{ value }}" title="{{ value }}">{{ labels.get(value, value) }}</span>
+<span class="badge kind-{{ 'warning' if warning else value }}" title="{{ value }}">{{ warning.label if warning else labels.get(value, value) }}</span>
 {%- endmacro %}
 
 {% macro repo_link(full_name) -%}

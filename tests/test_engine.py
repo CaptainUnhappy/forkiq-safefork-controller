@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch
 from app.db import DB, insert_repository
 from app.engine import Worker, register, run_cycle, source_client, verify_live
 from app.gitstore import SyncBlocked, RemoteReadUnavailable
+from app.github import AuthError, GitHub
+from app.errors import protection_notice
 from test_safefork import A, B, MAIN, MemoryStore, config, metadata
 
 
@@ -120,6 +122,45 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(row["enabled"], 0)
         self.assertNotIn("fixture-token", row["last_error"])
         self.assertEqual(json.loads(row["config_json"]), self.cfg)
+
+    def test_source_404_preserves_reason_and_stops_without_writes(self):
+        self.add()
+        self.client.get_repo.side_effect = AuthError("fixture-sensitive-response", status=404)
+        self.cycle()
+        row = self.row()
+        self.assertEqual((row["enabled"], row["review_required"], row["status"]), (0, 1, "needs_attention"))
+        self.assertIn("上游仓库不可访问（HTTP 404）", row["last_error"])
+        self.assertNotIn("fixture-sensitive", row["last_error"])
+        self.assertEqual(protection_notice(row["last_error"])["label"], "上游不可用")
+        self.assertEqual(json.loads(row["config_json"]), self.cfg)
+        self.assertEqual(self.store.writes, [])
+        self.assertEqual(self.row()["retry_count"], 0)
+
+    def test_target_404_and_source_401_are_not_classified_as_deleted_upstream(self):
+        for side, status in (("source", 401), ("source", 403), ("target", 404)):
+            with self.subTest(side=side, status=status):
+                self.db.run("DELETE FROM repositories")
+                key = self.add()
+                def metadata_read(name):
+                    if name == self.cfg[side]:
+                        raise AuthError("fixture-sensitive-response", status=status)
+                    return self.source if name == self.cfg["source"] else self.target
+                self.client.get_repo.side_effect = metadata_read
+                self.cycle()
+                row = self.row(key)
+                self.assertEqual((row["enabled"], row["review_required"]), (0, 1))
+                self.assertIsNone(protection_notice(row["last_error"]))
+                self.assertNotIn("fixture-sensitive", row["last_error"])
+                self.assertEqual(self.store.writes, [])
+
+    def test_metadata_error_keeps_http_status_without_payload(self):
+        client = GitHub(token="fixture-only")
+        for status in (401, 403, 404):
+            with patch.object(client, "_request", return_value=(status, {"secret": "fixture-response"}, {})):
+                with self.assertRaises(AuthError) as error:
+                    client.get_repo("owner/repo")
+            self.assertEqual(error.exception.status, status)
+            self.assertNotIn("fixture-response", str(error.exception))
 
     def test_pause_during_fetch_blocks_push_and_preserves_pause(self):
         self.add()
