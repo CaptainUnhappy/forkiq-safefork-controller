@@ -36,7 +36,8 @@ class CredentialRetryTests(unittest.TestCase):
         self.addCleanup(self.transport.stop)
         # The mocked opener never opens TLS. Avoid retaining a system CA store in
         # every recorded HTTPSHandler argument while running beside the live server.
-        self.tls = patch('app.github.ssl.create_default_context', return_value=None)
+        # None makes Python 3.12 HTTPSHandler load a fresh default CA store itself.
+        self.tls = patch('app.github.ssl.create_default_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
         self.tls.start()
         self.addCleanup(self.tls.stop)
 
