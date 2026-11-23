@@ -85,14 +85,26 @@ class WebTests(unittest.TestCase):
         self.assertEqual((row["enabled"], row["retry_count"], row["next_retry_at"]), (0, 0, 0))
 
     def test_setup_minimum_and_one_time(self):
-        response = self.client.post("/setup", data={"password": "short", "password2": "short"})
-        self.assertIn("12", response.text)
+        response = self.client.post("/setup", data={"password": "seven77", "password2": "seven77"})
+        self.assertIn("8–1024", response.text)
+        self.assertEqual(response.text.count('minlength="8"'), 2)
         self.assertIsNone(self.db.get_setting("setup_done"))
-        response = self.client.post("/setup", data={"password": "test-password-123", "password2": "test-password-123"}, follow_redirects=False)
+        response = self.client.post("/setup", data={"password": "fixture8", "password2": "fixture8"}, follow_redirects=False)
         self.assertEqual(response.headers["location"], "/login")
         before = self.db.get_setting("admin_pass_hash")
+        self.assertNotEqual(before, "fixture8")
+        self.assertTrue(main.verify_password("fixture8", before))
         self.client.post("/setup", data={"password": "other-password-123", "password2": "other-password-123"})
         self.assertEqual(self.db.get_setting("admin_pass_hash"), before)
+
+    def test_setup_maximum_and_confirmation(self):
+        for password, confirmation in (("x" * 1025, "x" * 1025), ("fixture8", "different")):
+            self.client.post("/setup", data={"password": password, "password2": confirmation})
+            self.assertIsNone(self.db.get_setting("setup_done"))
+            self.assertIsNone(self.db.get_setting("admin_pass_hash"))
+        response = self.client.post("/setup", data={"password": "x" * 1024, "password2": "x" * 1024}, follow_redirects=False)
+        self.assertEqual(response.headers["location"], "/login")
+        self.assertTrue(main.verify_password("x" * 1024, self.db.get_setting("admin_pass_hash")))
 
     def test_verifying_is_visible_and_manual_controls_cancel_authority(self):
         csrf = self.login(); repo = self.repo()
@@ -266,10 +278,46 @@ class WebTests(unittest.TestCase):
 
     def test_password_change_revokes_sessions(self):
         csrf = self.login()
+        self.db.run("INSERT INTO sessions(token,created_at,expires_at) VALUES(?,?,?)", ("another-session", time.time(), time.time() + 60))
+        settings = self.client.get("/settings").text
+        self.assertIn("至少 8 位", settings)
+        self.assertEqual(settings.count('minlength="8"'), 2)
+        self.assertEqual(settings.count('maxlength="1024"'), 2)
         response = self.client.post("/settings/password", data={"csrf": csrf, "current": "test-password-123",
-                                    "password": "changed-password-123", "password2": "changed-password-123"}, follow_redirects=False)
-        self.assertEqual(response.status_code, 302)
+                                    "password": "fixture8", "password2": "fixture8"}, follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (302, "/login"))
         self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM sessions")["n"], 0)
+        stored = self.db.get_setting("admin_pass_hash")
+        self.assertNotEqual(stored, "fixture8")
+        self.assertTrue(main.verify_password("fixture8", stored))
+        self.assertFalse(main.verify_password("test-password-123", stored))
+        response = self.client.post("/login", data={"password": "test-password-123"}, follow_redirects=False)
+        self.assertIn("密码不正确", response.text)
+        response = self.client.post("/login", data={"password": "fixture8"}, follow_redirects=False)
+        self.assertEqual((response.status_code, response.headers["location"]), (302, "/"))
+
+    def test_password_change_rejects_invalid_inputs_without_revoking_sessions(self):
+        csrf = self.login()
+        before = self.db.get_setting("admin_pass_hash")
+        for current, password, confirmation in (
+            ("test-password-123", "seven77", "seven77"),
+            ("test-password-123", "x" * 1025, "x" * 1025),
+            ("test-password-123", "fixture8", "different"),
+            ("wrong-current", "fixture8", "fixture8"),
+        ):
+            with self.subTest(length=len(password), current_valid=current == "test-password-123"):
+                response = self.client.post("/settings/password", data={"csrf": csrf, "current": current,
+                                            "password": password, "password2": confirmation}, follow_redirects=False)
+                self.assertTrue(response.headers["location"].startswith("/settings?notice="))
+                self.assertEqual(self.db.get_setting("admin_pass_hash"), before)
+                self.assertEqual(self.db.one("SELECT COUNT(*) AS n FROM sessions")["n"], 1)
+
+    def test_password_change_accepts_maximum(self):
+        csrf = self.login()
+        response = self.client.post("/settings/password", data={"csrf": csrf, "current": "test-password-123",
+                                    "password": "x" * 1024, "password2": "x" * 1024}, follow_redirects=False)
+        self.assertEqual(response.headers["location"], "/login")
+        self.assertTrue(main.verify_password("x" * 1024, self.db.get_setting("admin_pass_hash")))
 
     def test_subpath_manifest(self):
         for address in ("https://controller.example.invalid/SafeFork", "https://controller.example.invalid/SafeFork/"):

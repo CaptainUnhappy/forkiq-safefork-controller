@@ -55,11 +55,14 @@ def check(image, memory_mib=128, report=None):
                 return response.geturl(), response.read().decode()
         _, page = request("/setup")
         assert "设置管理员密码" in page
-        fixture_password = "synthetic-test-password-ONLY"
+        assert page.count('minlength="8"') == 2
+        fixture_password = "fixture8"
         request("/setup", {"password": fixture_password, "password2": fixture_password})
         _, page = request("/login", {"password": fixture_password})
         assert "概览" in page
         assert 'data-refresh-url="/SafeFork/partials/overview"' in page
+        _, page = request("/settings")
+        assert page.count('minlength="8"') == 2 and page.count('maxlength="1024"') == 2
         for asset in ("app.css", "app.js", "icons.svg", "favicon.svg"):
             request("/static/" + asset)
         _, page = request("/partials/repos")

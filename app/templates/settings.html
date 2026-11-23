@@ -28,8 +28,8 @@
 <section class="card"><h2>账户安全</h2>
   <form method="post" action="{{ base_path }}/settings/password" class="stacked-form"><input type="hidden" name="csrf" value="{{ csrf }}">
     <label>当前密码<input type="password" name="current" autocomplete="current-password" required></label>
-    <label>新密码（至少 12 位）<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
-    <label>再次输入<input type="password" name="password2" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+    <label>新密码（至少 {{ password_min_length }} 位）<input type="password" name="password" autocomplete="new-password" minlength="{{ password_min_length }}" maxlength="1024" required></label>
+    <label>再次输入<input type="password" name="password2" autocomplete="new-password" minlength="{{ password_min_length }}" maxlength="1024" required></label>
     <button class="primary">更新密码并退出所有会话</button>
   </form>
 </section>

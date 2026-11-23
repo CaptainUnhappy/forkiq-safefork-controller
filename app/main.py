@@ -27,6 +27,7 @@ STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
 PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", str(STATE_DIR / "app.pem"))
 BASE = Path(__file__).parent
 SESSION_TTL = 7 * 86400
+MIN_PASSWORD_LENGTH = 8
 MANIFEST_URL = "https://github.com/settings/apps/new"
 
 
@@ -106,7 +107,7 @@ def current_session(request):
 def render(request, name, **context):
     token = request.cookies.get(session_cookie(request), "")
     context.update(csrf=csrf_for(token) if token else "", setup_done=db.get_setting("setup_done") == "1",
-                   asset_version=ASSET_VERSION, base_path=base_path(request))
+                   asset_version=ASSET_VERSION, base_path=base_path(request), password_min_length=MIN_PASSWORD_LENGTH)
     return templates.TemplateResponse(request, name, context)
 
 
@@ -304,8 +305,8 @@ def setup_page(request: Request):
 def setup_submit(request: Request, password: str = Form(""), password2: str = Form("")):
     if db.get_setting("setup_done") == "1":
         return redirect(request, "/")
-    if len(password) < 12 or len(password) > 1024:
-        return render(request, "setup.html", error="密码需为 12–1024 位")
+    if len(password) < MIN_PASSWORD_LENGTH or len(password) > 1024:
+        return render(request, "setup.html", error=f"密码需为 {MIN_PASSWORD_LENGTH}–1024 位")
     if password != password2:
         return render(request, "setup.html", error="两次输入的密码不一致")
     hashed = hash_password(password)
@@ -598,7 +599,7 @@ def settings_password(request: Request, csrf: str = Form(""), current: str = For
     denied = form_guard(request, csrf)
     if denied:
         return denied
-    if not verify_password(current, db.get_setting("admin_pass_hash", "")) or not 12 <= len(password) <= 1024 or password != password2:
+    if not verify_password(current, db.get_setting("admin_pass_hash", "")) or not MIN_PASSWORD_LENGTH <= len(password) <= 1024 or password != password2:
         return redirect(request, "/settings?notice=当前密码不正确或新密码不符合要求")
     db.set_setting("admin_pass_hash", hash_password(password))
     db.run("DELETE FROM sessions")
