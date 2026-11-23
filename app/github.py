@@ -22,9 +22,16 @@ REFS_QUERY = """query SafeForkRefs($owner:String!, $name:String!, $prefix:String
 
 
 class AuthError(RuntimeError):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, stage="metadata"):
         super().__init__(message)
         self.status = status
+        self.stage = stage
+
+
+class TransportError(RuntimeError):
+    def __init__(self, category, stage="transport"):
+        super().__init__("GitHub 连接失败（" + category + "）。")
+        self.category, self.stage = category, stage
 
 
 class RateLimited(RuntimeError):
@@ -73,11 +80,11 @@ class GitHub:
             except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
                 reason = error.reason if isinstance(error, urllib.error.URLError) else error
                 if isinstance(reason, ssl.SSLCertVerificationError):
-                    raise RuntimeError("GitHub 证书验证失败，已停止连接。") from None
+                    raise TransportError("certificate") from None
                 if attempt + 1 == attempts:
                     if read:
                         raise RemoteReadUnavailable("GitHub 只读接口连接失败，本轮读取未完成。") from None
-                    raise RuntimeError("无法连接 GitHub，请检查网络。") from None
+                    raise TransportError("network") from None
             time.sleep(2 ** attempt)
 
     def app_jwt(self):
@@ -91,11 +98,26 @@ class GitHub:
         if self._token and time.time() < self._token_exp:
             return self._token
         if not (self.app_id and self.pem_path and self.installation_id):
-            raise AuthError("GitHub App 尚未配置。")
-        status, payload, _ = self._request("POST", f"{API}/app/installations/{self.installation_id}/access_tokens",
-                                         {"Authorization": f"Bearer {self.app_jwt()}"})
+            raise AuthError("GitHub App 尚未配置。", stage="installation_token")
+        try:
+            assertion = self.app_jwt()
+        except (OSError, ValueError, jwt.PyJWTError):
+            raise AuthError("GitHub App 签名失败，请核对密钥配置。", stage="app_signing") from None
+        try:
+            # One request per scheduler attempt; never enable retries for arbitrary POSTs.
+            status, payload, _ = self._request("POST", f"{API}/app/installations/{self.installation_id}/access_tokens",
+                                             {"Authorization": f"Bearer {assertion}"})
+        except TransportError as error:
+            if error.category == "network":
+                raise RemoteReadUnavailable("GitHub App 临时令牌暂不可用（阶段 installation_token；类别 network）。") from None
+            raise TransportError(error.category, stage="installation_token") from None
+        if status in (500, 502, 503, 504):
+            raise RemoteReadUnavailable(f"GitHub App 临时令牌暂不可用（阶段 installation_token；类别 service；HTTP {status}）。")
         if status != 201:
-            raise AuthError(f"获取安装令牌失败（HTTP {status}）。")
+            raise AuthError(f"获取安装令牌失败（HTTP {status}）。", status=status, stage="installation_token")
+        if (not isinstance(payload, dict) or not isinstance(payload.get("token"), str)
+                or not payload["token"] or len(payload["token"]) > 16384 or any(c.isspace() for c in payload["token"])):
+            raise AuthError("GitHub 安装令牌响应格式无效。", status=status, stage="installation_token")
         self._token, self._token_exp = payload["token"], time.time() + 3000
         return self._token
 

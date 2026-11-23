@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from .db import utcnow
+from .errors import failure_summary
 from .gitstore import GitStore, PushNetworkError, RemoteReadUnavailable, SyncBlocked
 from .safefork import validate_config, valid_ref, valid_sha
 
@@ -59,7 +60,7 @@ def queue_check(db, original, linked, error, cancelled):
     intent = json.loads(row["push_intent_json"])
     intent["retry_allowed"] = isinstance(error, PushNetworkError) and row["retry_count"] < len(DELAYS)
     count = min(row["retry_count"] + 1, len(DELAYS))
-    reason = str(error) if isinstance(error, SyncBlocked) else "目标推送结果未知（unknown）。"
+    reason = str(error) if isinstance(error, SyncBlocked) else "目标推送结果未知（unknown）。" + failure_summary(error, "push")
     message = reason + " 已安排只读结果核验；不会直接重复推送。"
     return _change(db, row, dict(push_intent_json=json.dumps(intent, sort_keys=True), status="verifying",
         retry_count=count, next_retry_at=time.time() + DELAYS[count - 1], last_error=message,
@@ -146,10 +147,10 @@ def reconcile(db, row, client, store_type=GitStore, cancelled=lambda: False):
             return
         if isinstance(error, RemoteReadUnavailable) and row["retry_count"] < len(DELAYS):
             count = row["retry_count"] + 1
-            message = "只读推送结果核验暂不可用，延迟继续核验；未重复推送。"
+            message = "只读推送结果核验暂不可用，延迟继续核验；未重复推送。" + str(error)
             _change(db, row, dict(next_retry_at=time.time() + DELAYS[count - 1], retry_count=count,
                 last_error=message, last_check_at=utcnow()), message, "retry")
             return
-        message = str(error) if isinstance(error, SyncBlocked) else "推送记录或身份核验失败，保持停写；请人工预览。"
+        message = str(error) if isinstance(error, SyncBlocked) else failure_summary(error, "reconcile")
         _change(db, row, dict(enabled=0, review_required=1, status="needs_attention", next_retry_at=0,
             push_intent_json=None, plan_json=None, last_error=message, last_check_at=utcnow()), message, "blocked")

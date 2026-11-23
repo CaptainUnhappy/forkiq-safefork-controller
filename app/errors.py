@@ -2,6 +2,23 @@
 import re
 
 
+def failure_summary(error, stage="sync"):
+    """Keep bounded diagnostic fields, never exception arguments or remote payloads."""
+    stages = {"sync", "metadata", "transport", "installation_token", "app_signing", "push", "reconcile"}
+    error_stage = getattr(error, "stage", None)
+    phase = error_stage if isinstance(error_stage, str) and error_stage in stages else stage if stage in stages else "sync"
+    name = type(error).__name__
+    name = name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "Exception"
+    fields = ["阶段 " + phase, "异常 " + name]
+    category = getattr(error, "category", None)
+    if category in ("network", "certificate"):
+        fields.append("类别 " + category)
+    status = getattr(error, "status", None)
+    if type(status) is int and 100 <= status <= 599:
+        fields.append("HTTP " + str(status))
+    return "检查或连接失败（" + "；".join(fields) + "）；已停写，请核对凭据、网络与仓库状态后预览。"
+
+
 def protection_notice(message):
     """Classify known upstream safety guards, never generic failures or raw HTTP payloads."""
     text = (message or "").strip()

@@ -1,10 +1,22 @@
 """Known failures get actionable copy without changing the original evidence."""
 import unittest
 
-from app.errors import error_guidance, protection_notice
+from app.errors import error_guidance, failure_summary, protection_notice
 
 
 class ErrorGuidanceTests(unittest.TestCase):
+    def test_failure_summary_keeps_safe_diagnostics_not_exception_payload(self):
+        error = RuntimeError('private-token-and-key-path')
+        error.stage, error.status, error.category = 'installation_token', 403, 'certificate'
+        summary = failure_summary(error)
+        for value in ('installation_token', 'RuntimeError', 'HTTP 403', 'certificate'):
+            self.assertIn(value, summary)
+        self.assertNotIn('private-token', summary)
+        error.stage, error.status, error.category = ['private-token'], 'private-token', 'private-token'
+        summary = failure_summary(error, 'reconcile')
+        self.assertIn('reconcile', summary)
+        self.assertNotIn('private-token', summary)
+
     def test_history_and_source_guards_are_warnings(self):
         for message in ("不是快进：refs/heads/main；保留目标历史，未写入任何引用。",
                         "服务器已有历史不能后退或移动标签：refs/heads/main",

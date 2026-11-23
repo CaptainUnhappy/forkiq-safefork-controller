@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 from .db import DB, insert_repository, log_event, utcnow
+from .errors import failure_summary
 from .github import AuthError, GitHub
 from .gitstore import GitStore, SyncBlocked, RemoteReadUnavailable, process_lock
 from .safefork import repo_name, synchronize, validate_config, validate_identity
@@ -86,7 +87,7 @@ def verify_live(config, source, target):
     try:
         source_meta = source.get_repo(config["source"])
     except AuthError as error:
-        if error.status == 404:
+        if error.status == 404 and error.stage == "metadata":
             raise SyncBlocked("上游仓库不可访问（HTTP 404）；可能已删除、转为私有或授权变化，已保留现有历史并停写。") from None
         raise
     validate_identity(config, source_meta, target.get_repo(config["target"]))
@@ -184,7 +185,7 @@ def run_cycle(db, client, store_type=GitStore, cancelled=lambda: False, only_req
                               f"{'只读预览' if dry else '同步已核对'}：{len(plan['updates'])} 个安全更新，"
                               f"清理 {len(plan.get('deletes', {}))} 个过期分支，保留 {len(plan['target_only'])} 个目标独有引用。")
             except Exception as error:
-                message = str(error) if isinstance(error, SyncBlocked) else "检查或连接失败；已停写，请核对凭据、网络与仓库状态后预览。"
+                message = str(error) if isinstance(error, SyncBlocked) else failure_summary(error)
                 if intent_saved:
                     from .reconcile import queue_check
                     if queue_check(db, row, connection, error, cancelled):
