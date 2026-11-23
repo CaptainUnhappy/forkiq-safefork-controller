@@ -34,6 +34,11 @@ class CredentialRetryTests(unittest.TestCase):
         self.transport = patch('app.github.urllib.request.build_opener', return_value=self.opener)
         self.transport.start()
         self.addCleanup(self.transport.stop)
+        # The mocked opener never opens TLS. Avoid retaining a system CA store in
+        # every recorded HTTPSHandler argument while running beside the live server.
+        self.tls = patch('app.github.ssl.create_default_context', return_value=None)
+        self.tls.start()
+        self.addCleanup(self.tls.stop)
 
     def row(self):
         return self.db.one('SELECT * FROM repositories WHERE id=?', (self.key,))
